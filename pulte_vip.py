@@ -52,32 +52,69 @@ def _decode_csv(data: bytes) -> str:
 
 def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]]]:
     raw_text = _decode_csv(_read_uploaded_bytes(uploaded_file))
-    raw_rows = list(csv.reader(io.StringIO(raw_text)))
+
+    # Prisma exports may use commas, tabs, semicolons, or pipes.
+    sample = raw_text[:10000]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        reader = csv.reader(io.StringIO(raw_text), dialect)
+    except csv.Error:
+        reader = csv.reader(io.StringIO(raw_text))
+
+    raw_rows = list(reader)
 
     header_index = None
+    placement_name_header = None
+
     for index, row in enumerate(raw_rows):
-        normalized = {_clean(cell) for cell in row}
-        if "Placement Name" in normalized and "Placement ID" in normalized:
+        cleaned_headers = [_clean(cell).replace("\n", " ") for cell in row]
+        normalized_headers = {
+            _normalize(header): header for header in cleaned_headers if header
+        }
+
+        # Only Placement Name is mandatory. Prisma identifier columns vary
+        # between exports, for example Placement ID or Ad server ID.
+        if "placementname" in normalized_headers:
             header_index = index
+            placement_name_header = normalized_headers["placementname"]
             break
 
-    if header_index is None:
+    if header_index is None or placement_name_header is None:
+        preview = [
+            " | ".join(_clean(cell) for cell in row[:8])
+            for row in raw_rows[:10]
+            if any(_clean(cell) for cell in row)
+        ]
         raise ValueError(
             "The Prisma header row could not be found. "
-            "The CSV must contain Placement Name and Placement ID columns."
+            "A Placement Name column is required. "
+            f"First rows detected: {preview}"
         )
 
-    headers = [_clean(value) for value in raw_rows[header_index]]
+    headers = [
+        _clean(value).replace("\n", " ")
+        for value in raw_rows[header_index]
+    ]
     records: list[dict[str, str]] = []
 
     for row in raw_rows[header_index + 1 :]:
-        padded = row + [""] * (len(headers) - len(row))
-        record = dict(zip(headers, padded))
-        if _clean(record.get("Placement Name")):
+        padded = row + [""] * max(0, len(headers) - len(row))
+        record = dict(zip(headers, padded[:len(headers)]))
+
+        if _clean(record.get(placement_name_header)):
+            # Standardize the key used by the rest of the script.
+            if placement_name_header != "Placement Name":
+                record["Placement Name"] = record.get(
+                    placement_name_header,
+                    "",
+                )
             records.append(record)
 
     if not records:
-        raise ValueError("No placement rows were found in the Prisma CSV.")
+        raise ValueError(
+            "The Placement Name header was found, but no placement rows "
+            "were detected below it."
+        )
 
     return raw_rows, records
 
