@@ -22,6 +22,24 @@ TRAFFIC_START_ROW = 8
 TRAFFIC_LAST_COLUMN = 24
 
 
+def _find_traffic_header_row(sheet) -> int:
+    """Find the row containing the Traffic_Doc column headers."""
+    for row_number in range(1, min(sheet.max_row, 30) + 1):
+        values = {
+            _normalize(sheet.cell(row=row_number, column=column).value)
+            for column in range(1, min(sheet.max_column, 40) + 1)
+        }
+        if "adname" in values and "creativefilename" in values:
+            return row_number
+
+    # Existing template fallback.
+    return TRAFFIC_START_ROW - 1
+
+
+def _traffic_data_start_row(sheet) -> int:
+    return _find_traffic_header_row(sheet) + 1
+
+
 def _clean(value) -> str:
     if value is None:
         return ""
@@ -135,13 +153,18 @@ def clear_old_template_data(workbook) -> None:
 
     if TRAFFIC_SHEET in workbook.sheetnames:
         sheet = workbook[TRAFFIC_SHEET]
+        first_data_row = _traffic_data_start_row(sheet)
         max_row = max(sheet.max_row, 5000)
+        max_col = max(sheet.max_column, 40)
 
+        # Clear every old trafficking value below the actual header row.
+        # This removes old Ad Names and Creative File Names even when the
+        # template's first data row is not row 8.
         for row in sheet.iter_rows(
-            min_row=TRAFFIC_START_ROW,
+            min_row=first_data_row,
             max_row=max_row,
             min_col=1,
-            max_col=TRAFFIC_LAST_COLUMN,
+            max_col=max_col,
         ):
             for cell in row:
                 cell.value = None
@@ -642,10 +665,11 @@ def populate_traffic_sheet(
     campaign_name = _campaign_name_from_raw_rows(raw_rows)
     sheet["B1"] = campaign_name
 
-    template_row = TRAFFIC_START_ROW
+    first_data_row = _traffic_data_start_row(sheet)
+    template_row = first_data_row
 
     for index, record in enumerate(records):
-        output_row = TRAFFIC_START_ROW + index
+        output_row = first_data_row + index
         _copy_row_format(sheet, template_row, output_row)
 
         placement_name = _clean(record.get("Placement Name"))
