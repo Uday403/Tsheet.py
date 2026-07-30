@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import load_workbook
-from openpyxl.formula.translate import Translator
+from openpyxl.utils import get_column_letter
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,31 +20,23 @@ ROTATION_SHEET = "Multi-Ad or Creative Rotation"
 
 TRAFFIC_HEADER_ROW = 6
 TRAFFIC_FIRST_DATA_ROW = 7
-
-# Only these Traffic_Doc columns are manually populated for normal Pulte.
-AD_NAME_COLUMN = 8          # H
-ACTION_COLUMN = 10          # J
-CREATIVE_COLUMN = 11        # K
-STUDIO_COLUMN = 12          # L
-CLICK_URL_COLUMN = 16       # P
+TRAFFIC_LAST_COLUMN = 23  # Column W
 
 
 def _clean(value) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+    return "" if value is None else str(value).strip()
 
 
-def _normalize(value: str) -> str:
+def _normalize(value) -> str:
     return re.sub(r"[^a-z0-9]+", "", _clean(value).lower())
 
 
-def _uploaded_bytes(uploaded_file) -> bytes:
+def _read_uploaded_bytes(uploaded_file) -> bytes:
     uploaded_file.seek(0)
     return uploaded_file.read()
 
 
-def _decode_csv(data: bytes) -> str:
+def _decode_text(data: bytes) -> str:
     for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
             return data.decode(encoding)
@@ -53,123 +45,117 @@ def _decode_csv(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]]]:
-    raw_text = _decode_csv(_uploaded_bytes(uploaded_file))
+def _read_csv_rows(uploaded_file) -> list[list[str]]:
+    text = _decode_text(_read_uploaded_bytes(uploaded_file))
 
     try:
         dialect = csv.Sniffer().sniff(
-            raw_text[:10000],
+            text[:10000],
             delimiters=",;\t|",
         )
-        reader = csv.reader(io.StringIO(raw_text), dialect)
+        reader = csv.reader(io.StringIO(text), dialect)
     except csv.Error:
-        reader = csv.reader(io.StringIO(raw_text))
+        reader = csv.reader(io.StringIO(text))
 
-    raw_rows = list(reader)
+    return [list(row) for row in reader]
 
-    header_index = None
-    placement_header = None
 
-    for row_index, row in enumerate(raw_rows):
-        cleaned = [_clean(cell).replace("\n", " ") for cell in row]
-        normalized = {
-            _normalize(header): header
-            for header in cleaned
-            if header
-        }
+def _find_header_row(raw_rows: list[list[str]]) -> tuple[int, list[str]]:
+    for index, row in enumerate(raw_rows):
+        headers = [_clean(cell).replace("\n", " ") for cell in row]
+        normalized = {_normalize(header) for header in headers}
 
         if "placementname" in normalized:
-            header_index = row_index
-            placement_header = normalized["placementname"]
-            break
+            return index, headers
 
-    if header_index is None or placement_header is None:
-        raise ValueError(
-            "The Prisma header row could not be found. "
-            "The file must contain a Placement Name column."
-        )
+    raise ValueError(
+        "The Prisma header row could not be found. "
+        "The uploaded file must contain a Placement Name column."
+    )
 
-    headers = [
-        _clean(value).replace("\n", " ")
-        for value in raw_rows[header_index]
-    ]
+
+def _header_value(
+    record: dict[str, str],
+    *possible_names: str,
+) -> str:
+    normalized_record = {
+        _normalize(key): value
+        for key, value in record.items()
+    }
+
+    for name in possible_names:
+        value = normalized_record.get(_normalize(name))
+        if value is not None:
+            return _clean(value)
+
+    return ""
+
+
+def read_prisma_export(
+    uploaded_file,
+) -> tuple[list[list[str]], list[dict[str, str]]]:
+    """
+    Returns:
+      1. Every row from the Prisma export, for pasting into the Prisma tab.
+      2. Only valid placement records, including the original Excel row number.
+
+    Package/header rows are not sent to Traffic_Doc.
+    """
+    raw_rows = _read_csv_rows(uploaded_file)
+    header_index, headers = _find_header_row(raw_rows)
 
     records: list[dict[str, str]] = []
 
-    for row in raw_rows[header_index + 1:]:
+    for raw_index in range(header_index + 1, len(raw_rows)):
+        row = raw_rows[raw_index]
         padded = row + [""] * max(0, len(headers) - len(row))
         record = dict(zip(headers, padded[:len(headers)]))
 
-        placement_name = _clean(record.get(placement_header))
+        placement_name = _header_value(record, "Placement Name")
         if not placement_name:
             continue
 
-        if placement_header != "Placement Name":
-            record["Placement Name"] = placement_name
+        # Ignore obvious package rows.
+        row_type = _header_value(
+            record,
+            "Row Type",
+            "Type",
+            "Package / Placement",
+        ).lower()
 
+        if row_type == "package":
+            continue
+
+        normalized_name = placement_name.lower()
+        if normalized_name.startswith("package:"):
+            continue
+
+        record["Placement Name"] = placement_name
+
+        # Excel row number after pasting the full raw export at row 1.
+        record["_source_excel_row"] = str(raw_index + 1)
         records.append(record)
 
     if not records:
         raise ValueError(
-            "Placement Name was found, but there are no placement rows below it."
+            "The Placement Name header was found, but no placement rows "
+            "were detected below it."
         )
 
     return raw_rows, records
 
 
-def _find_placement_name_column(headers: list[str]) -> int:
-    for index, header in enumerate(headers, start=1):
-        if _normalize(header) == "placementname":
-            return index
-    raise ValueError("Placement Name column could not be identified.")
-
-
-def _remove_package_rows(
-    raw_rows: list[list[str]],
-) -> list[list[str]]:
-    """
-    Removes package/header rows while preserving the original Prisma layout.
-
-    A valid placement row must have a Placement Name and must not be a package.
-    """
-    header_index = None
-
-    for index, row in enumerate(raw_rows):
-        if any(_normalize(cell) == "placementname" for cell in row):
-            header_index = index
-            break
-
-    if header_index is None:
-        return raw_rows
-
-    headers = [_clean(cell) for cell in raw_rows[header_index]]
-    placement_col = _find_placement_name_column(headers) - 1
-
-    output = raw_rows[:header_index + 1]
-
-    for row in raw_rows[header_index + 1:]:
-        placement = _clean(row[placement_col]) if placement_col < len(row) else ""
-        normalized = placement.lower()
-
-        if not placement:
-            continue
-
-        if "package" in normalized and "placement" not in normalized:
-            continue
-
-        output.append(row)
-
-    return output
-
-
-def _clear_prisma_sheet(sheet) -> None:
-    max_row = max(sheet.max_row, 5000)
-    max_col = max(sheet.max_column, 60)
-
+def _clear_sheet_values(
+    sheet,
+    min_row: int,
+    max_row: int,
+    min_col: int,
+    max_col: int,
+) -> None:
     for row in sheet.iter_rows(
-        min_row=1,
+        min_row=min_row,
         max_row=max_row,
-        min_col=1,
+        min_col=min_col,
         max_col=max_col,
     ):
         for cell in row:
@@ -184,40 +170,40 @@ def paste_prisma_export(
         raise KeyError(f"Missing worksheet: {PRISMA_SHEET}")
 
     sheet = workbook[PRISMA_SHEET]
-    _clear_prisma_sheet(sheet)
 
-    filtered_rows = _remove_package_rows(raw_rows)
+    _clear_sheet_values(
+        sheet,
+        min_row=1,
+        max_row=max(sheet.max_row, 5000),
+        min_col=1,
+        max_col=max(sheet.max_column, 60),
+    )
 
-    for row_index, values in enumerate(filtered_rows, start=1):
-        for column_index, value in enumerate(values, start=1):
+    for row_number, row_values in enumerate(raw_rows, start=1):
+        for column_number, value in enumerate(row_values, start=1):
             sheet.cell(
-                row=row_index,
-                column=column_index,
+                row=row_number,
+                column=column_number,
                 value=value,
             )
 
 
-def _find_dimension(value: str) -> str:
+def _find_dimension(text: str) -> str:
     match = re.search(
         r"(?<!\d)(\d{2,4})\s*[xX]\s*(\d{2,4})(?!\d)",
-        value,
+        _clean(text),
     )
-    if not match:
-        return ""
-    return f"{match.group(1)}x{match.group(2)}"
+    return f"{match.group(1)}x{match.group(2)}" if match else ""
 
 
-def _split_placement(placement_name: str) -> list[str]:
-    return [
-        _clean(part)
-        for part in placement_name.split("_")
-    ]
+def _placement_parts(placement_name: str) -> list[str]:
+    return [_clean(part) for part in placement_name.split("_")]
 
 
-def _parse_placement(placement_name: str) -> dict[str, str]:
-    parts = _split_placement(placement_name)
+def _parse_pulte_placement(placement_name: str) -> dict[str, str]:
+    parts = _placement_parts(placement_name)
 
-    brand_names = {
+    brand_lookup = {
         "pulte": "Pulte",
         "delwebb": "Del Webb",
         "centex": "Centex",
@@ -230,10 +216,10 @@ def _parse_placement(placement_name: str) -> dict[str, str]:
     brand = "Pulte"
 
     for index, part in enumerate(parts):
-        normalized = _normalize(part)
-        if normalized in brand_names:
+        normalized_part = _normalize(part)
+        if normalized_part in brand_lookup:
             brand_index = index
-            brand = brand_names[normalized]
+            brand = brand_lookup[normalized_part]
             break
 
     division = ""
@@ -241,12 +227,10 @@ def _parse_placement(placement_name: str) -> dict[str, str]:
     community = ""
 
     if brand_index is not None:
-        if brand_index > 0:
+        if brand_index >= 1:
             division = parts[brand_index - 1]
-
         if brand_index + 1 < len(parts):
             campaign = parts[brand_index + 1]
-
         if brand_index + 2 < len(parts):
             community = parts[brand_index + 2]
 
@@ -268,9 +252,9 @@ def _parse_placement(placement_name: str) -> dict[str, str]:
 
 
 def build_ad_name(placement_name: str) -> str:
-    parsed = _parse_placement(placement_name)
+    parsed = _parse_pulte_placement(placement_name)
 
-    parts = [
+    values = [
         parsed["division"],
         parsed["brand"],
         parsed["campaign"],
@@ -278,14 +262,14 @@ def build_ad_name(placement_name: str) -> str:
         parsed["dimension"],
     ]
 
-    return "_".join(part for part in parts if part)
+    return "_".join(value for value in values if value)
 
 
-def _creative_names(creative_files: Iterable) -> list[str]:
+def _creative_file_names(creative_files: Iterable) -> list[str]:
     return [
         Path(file.name).name
         for file in creative_files
-        if getattr(file, "name", "")
+        if getattr(file, "name", None)
     ]
 
 
@@ -293,32 +277,26 @@ def _creative_score(
     creative_name: str,
     placement_name: str,
 ) -> int:
-    parsed = _parse_placement(placement_name)
+    parsed = _parse_pulte_placement(placement_name)
     normalized_creative = _normalize(creative_name)
     score = 0
 
-    checks = (
-        (parsed["dimension"], 15),
-        (parsed["community"], 12),
-        (parsed["community_id"], 10),
-        (parsed["division"], 4),
-        (parsed["brand"], 3),
+    weighted_values = (
+        (parsed["community_id"], 30),
+        (parsed["community"], 22),
+        (parsed["dimension"], 20),
+        (parsed["division"], 6),
+        (parsed["brand"], 4),
     )
 
-    for value, points in checks:
+    for value, weight in weighted_values:
         normalized_value = _normalize(value)
         if normalized_value and normalized_value in normalized_creative:
-            score += points
+            score += weight
 
-    community_words = [
-        word
-        for word in re.split(r"\W+", parsed["community"].lower())
-        if len(word) >= 4
-    ]
-
-    for word in community_words:
-        if word in creative_name.lower():
-            score += 3
+    for word in re.split(r"\W+", parsed["community"].lower()):
+        if len(word) >= 4 and word in creative_name.lower():
+            score += 4
 
     return score
 
@@ -327,179 +305,283 @@ def match_creative(
     creative_names: list[str],
     placement_name: str,
 ) -> str:
+    if not creative_names:
+        return ""
+
     ranked = sorted(
         (
             (_creative_score(name, placement_name), name)
             for name in creative_names
         ),
+        key=lambda item: (item[0], item[1]),
         reverse=True,
     )
 
-    if not ranked or ranked[0][0] <= 0:
-        return ""
-
-    return ranked[0][1]
+    return ranked[0][1] if ranked[0][0] > 0 else ""
 
 
-def _parse_full_urls(url_text: str) -> list[str]:
-    urls = []
+def _parse_complete_urls(text: str) -> list[str]:
+    """
+    Accepts:
+      - one complete URL per line
+      - placement<TAB>URL
+      - ad name<TAB>URL
+      - community ID<TAB>URL
 
-    for line in url_text.splitlines():
-        value = line.strip()
-        if value:
-            urls.append(value)
+    The URL is never modified.
+    """
+    urls: list[str] = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line:
+            urls.append(line)
 
     return urls
 
 
-def match_full_url(
-    urls: list[str],
+def _extract_url(line: str) -> str:
+    match = re.search(r"https?://\S+", line)
+    return match.group(0).rstrip(",;") if match else ""
+
+
+def match_complete_url(
+    url_lines: list[str],
     placement_name: str,
+    ad_name: str,
+    placement_index: int,
+    total_placements: int,
 ) -> str:
-    """
-    Normal Pulte receives complete URLs/UTMs from the team.
-    This function never creates, edits, or appends a UTM.
-    """
-    parsed = _parse_placement(placement_name)
+    parsed = _parse_pulte_placement(placement_name)
 
     community_id = parsed["community_id"]
+    normalized_placement = _normalize(placement_name)
+    normalized_ad_name = _normalize(ad_name)
+
+    # First: mapped line containing placement/ad/community ID.
+    for line in url_lines:
+        url = _extract_url(line)
+        if not url:
+            continue
+
+        normalized_line = _normalize(line)
+
+        if community_id and community_id in line:
+            return url
+        if normalized_ad_name and normalized_ad_name in normalized_line:
+            return url
+        if normalized_placement and normalized_placement in normalized_line:
+            return url
+
+    # Second: community words embedded in URL.
     community_words = [
         word.lower()
         for word in re.split(r"\W+", parsed["community"])
         if len(word) >= 4
     ]
 
-    if community_id:
-        for url in urls:
-            if community_id in url:
-                return url
+    for line in url_lines:
+        url = _extract_url(line)
+        lowered_url = url.lower()
 
-    for url in urls:
-        lowered = url.lower()
-        if community_words and all(
-            word in lowered
+        if url and community_words and all(
+            word in lowered_url
             for word in community_words
         ):
             return url
 
-    brand_domain = {
-        "Pulte": "pulte.com",
-        "Del Webb": "delwebb.com",
-        "Centex": "centex.com",
-        "DiVosta": "divosta.com",
-    }.get(parsed["brand"])
+    # Third: same number of URLs and placements = map by order.
+    extracted_urls = [
+        _extract_url(line)
+        for line in url_lines
+        if _extract_url(line)
+    ]
 
-    if brand_domain:
-        matching_brand_urls = [
-            url for url in urls
-            if brand_domain in url.lower()
-        ]
-        if len(matching_brand_urls) == 1:
-            return matching_brand_urls[0]
+    if len(extracted_urls) == total_placements:
+        return extracted_urls[placement_index]
 
-    if len(urls) == 1:
-        return urls[0]
+    # Fourth: only one URL supplied = apply to all.
+    if len(extracted_urls) == 1:
+        return extracted_urls[0]
 
     return ""
 
 
-def _copy_cell_formula_and_style(
-    source,
-    target,
-) -> None:
-    if source.has_style:
-        target._style = copy(source._style)
-
-    target.number_format = source.number_format
-    target.font = copy(source.font)
-    target.fill = copy(source.fill)
-    target.border = copy(source.border)
-    target.alignment = copy(source.alignment)
-    target.protection = copy(source.protection)
-
-    if source.data_type == "f" and source.value:
-        try:
-            target.value = Translator(
-                source.value,
-                origin=source.coordinate,
-            ).translate_formula(target.coordinate)
-        except Exception:
-            target.value = source.value
-    else:
-        target.value = source.value
-
-
-def _prepare_traffic_rows(
+def _copy_row_style(
     sheet,
-    required_rows: int,
+    source_row: int,
+    target_row: int,
 ) -> None:
-    """
-    Copies the template formulas and formatting from row 7 down.
-    Manual columns are cleared separately.
-    """
-    last_required_row = (
-        TRAFFIC_FIRST_DATA_ROW + required_rows - 1
+    for column in range(1, TRAFFIC_LAST_COLUMN + 1):
+        source = sheet.cell(source_row, column)
+        target = sheet.cell(target_row, column)
+
+        if source.has_style:
+            target._style = copy(source._style)
+
+        target.number_format = source.number_format
+        target.font = copy(source.font)
+        target.fill = copy(source.fill)
+        target.border = copy(source.border)
+        target.alignment = copy(source.alignment)
+        target.protection = copy(source.protection)
+
+    sheet.row_dimensions[target_row].height = (
+        sheet.row_dimensions[source_row].height
     )
 
-    source_row = TRAFFIC_FIRST_DATA_ROW
 
-    for target_row in range(
-        TRAFFIC_FIRST_DATA_ROW,
-        last_required_row + 1,
-    ):
-        if target_row != source_row:
-            for column in range(1, 24):
-                _copy_cell_formula_and_style(
-                    sheet.cell(source_row, column),
-                    sheet.cell(target_row, column),
-                )
-
-            sheet.row_dimensions[target_row].height = (
-                sheet.row_dimensions[source_row].height
-            )
-
-
-def _clear_old_manual_traffic_data(sheet) -> None:
+def _clear_old_traffic_rows(sheet) -> None:
     """
-    Clears only editable/manual fields.
-
-    Formula columns such as Site Name, Placement ID, Placement Name,
-    Dimensions, Trafficking Notes, Rotation and Dates are preserved.
+    Clears every old Traffic_Doc value below the header.
+    Styles remain available in the workbook.
     """
-    max_row = max(sheet.max_row, 5000)
-
-    manual_columns = [
-        AD_NAME_COLUMN,
-        ACTION_COLUMN,
-        CREATIVE_COLUMN,
-        STUDIO_COLUMN,
-        16, 17, 18, 19, 20, 21, 22, 23,  # P:W clickTag URLs
-    ]
-
-    for row in range(TRAFFIC_FIRST_DATA_ROW, max_row + 1):
-        for column in manual_columns:
-            sheet.cell(row=row, column=column).value = None
+    _clear_sheet_values(
+        sheet,
+        min_row=TRAFFIC_FIRST_DATA_ROW,
+        max_row=max(sheet.max_row, 5000),
+        min_col=1,
+        max_col=max(sheet.max_column, TRAFFIC_LAST_COLUMN),
+    )
 
 
-def _clear_old_rotation_data(workbook) -> None:
+def _clear_rotation_sheet(workbook) -> None:
     if ROTATION_SHEET not in workbook.sheetnames:
         return
 
     sheet = workbook[ROTATION_SHEET]
-    max_row = max(sheet.max_row, 5000)
-    max_col = max(sheet.max_column, 8)
 
-    for row in sheet.iter_rows(
+    _clear_sheet_values(
+        sheet,
         min_row=2,
-        max_row=max_row,
+        max_row=max(sheet.max_row, 5000),
         min_col=1,
-        max_col=max_col,
-    ):
-        for cell in row:
-            cell.value = None
+        max_col=max(sheet.max_column, 10),
+    )
 
 
-def populate_normal_pulte_sheet(
+def _traffic_formulas(
+    traffic_row: int,
+    prisma_row: int,
+) -> dict[int, str]:
+    """
+    Builds the formulas used by the shared master template.
+
+    The Prisma row is the original placement row from the pasted export,
+    so package rows do not break the Traffic_Doc references.
+    """
+    r = traffic_row
+    p = prisma_row
+
+    return {
+        1: (
+            f'=IF(D{r}<>"",CONCATENATE('
+            f'IF(OR(\'Additional Pixels\'!A$2="Y",'
+            f'\'Additional Pixels\'!A$2="Yes"),'
+            f'\'Additional Pixels\'!B$2,""),'
+            f'IF(OR(\'Additional Pixels\'!A$3="Y",'
+            f'\'Additional Pixels\'!A$3="Yes"),'
+            f'", "&\'Additional Pixels\'!B$3,""),'
+            f'IF(OR(\'Additional Pixels\'!A$4="Y",'
+            f'\'Additional Pixels\'!A$4="Yes"),'
+            f'", "&\'Additional Pixels\'!B$4,""),'
+            f'IF(OR(\'Additional Pixels\'!A$5="Y",'
+            f'\'Additional Pixels\'!A$5="Yes"),'
+            f'", "&\'Additional Pixels\'!B$5,""),'
+            f'IF(OR(\'Additional Pixels\'!A$6="Y",'
+            f'\'Additional Pixels\'!A$6="Yes"),'
+            f'", "&\'Additional Pixels\'!B$6,""),'
+            f'IF(OR(\'Additional Pixels\'!A$7="Y",'
+            f'\'Additional Pixels\'!A$7="Yes"),'
+            f'", "&\'Additional Pixels\'!B$7,""),'
+            f'IF(OR(\'Additional Pixels\'!A$8="Y",'
+            f'\'Additional Pixels\'!A$8="Yes"),'
+            f'", "&\'Additional Pixels\'!B$8,""),'
+            f'IF(OR(\'Additional Pixels\'!A$9="Y",'
+            f'\'Additional Pixels\'!A$9="Yes"),'
+            f'", "&\'Additional Pixels\'!B$9,""),'
+            f'IF(OR(\'Additional Pixels\'!A$10="Y",'
+            f'\'Additional Pixels\'!A$10="Yes"),'
+            f'", "&\'Additional Pixels\'!B$10,""),'
+            f'IF(OR(\'Additional Pixels\'!A$11="Y",'
+            f'\'Additional Pixels\'!A$11="Yes"),'
+            f'", "&\'Additional Pixels\'!B$11,"")),"")'
+        ),
+        2: (
+            f'=IF(ISNUMBER(SEARCH("*DELETE*",D{r})),"",'
+            f'IF(\'{PRISMA_SHEET}\'!J{p}="","",'
+            f'\'{PRISMA_SHEET}\'!J{p}))'
+        ),
+        3: (
+            f'=IF(ISNUMBER(SEARCH("*DELETE*",D{r})),"",'
+            f'IF(\'{PRISMA_SHEET}\'!O{p}="","",'
+            f'\'{PRISMA_SHEET}\'!O{p}))'
+        ),
+        4: (
+            f'=IF(AND(\'{PRISMA_SHEET}\'!U{p}="",'
+            f'\'{PRISMA_SHEET}\'!W{p}=""),"",'
+            f'IF(\'{PRISMA_SHEET}\'!U{p}="",'
+            f'"DELETE BLANK COLUMN Q - SEE INSTRUCTION TAB",'
+            f'\'{PRISMA_SHEET}\'!U{p}))'
+        ),
+        5: (
+            f'=IF(ISNUMBER(SEARCH("*DELETE*",D{r})),"",'
+            f'IF(\'{PRISMA_SHEET}\'!T{p}="","",'
+            f'SUBSTITUTE(\'{PRISMA_SHEET}\'!T{p}," ","")))'
+        ),
+        6: (
+            f'=IFERROR(IF(ISNUMBER(SEARCH("*DELETE*",D{r})),"",'
+            f'IF(ISNUMBER(MID(D{r},FIND(":",D{r})+1,2))="TRUE",'
+            f'MID(D{r},FIND(":",D{r})+1,2),'
+            f'IF(ISNUMBER(SEARCH("*15s*",D{r})),"15",'
+            f'IF(ISNUMBER(SEARCH("*30s*",D{r})),"30",'
+            f'IF(ISNUMBER(SEARCH("*60s*",D{r})),"60",'
+            f'IF(ISNUMBER(SEARCH("*90s*",D{r})),"90",'
+            f'IF(ISNUMBER(SEARCH("*6s*",D{r})),"6",""))))))),"")'
+        ),
+        7: (
+            f'=IF(ISNUMBER(SEARCH("*DELETE*",D{r})),"",'
+            f'IF(E{r}="0x0",'
+            f'IF(ISNUMBER(SEARCH("HULU",D{r})),"Vast",'
+            f'IF(ISNUMBER(SEARCH("ROKU",D{r})),"Vast",'
+            f'IF(ISNUMBER(SEARCH("ESPN",D{r})),"Vast","Vpaid"))),""))'
+        ),
+        9: (
+            f'=IF(ISNUMBER(SEARCH("*DELETE*",D{r})),"",'
+            f'IF(K{r}="","",IF(E{r}="1x1","",'
+            f'IF(F{r}="",'
+            f'IF(COUNTIF(K{r},"*"&E{r}&"*")>0,"","CHECK DIMENSION"),'
+            f'IF(COUNTIF(K{r},"*"&F{r}&"*")>0,"",'
+            f'IF(AND(B{r}="*NBC*",D{r}="*Hulu*"),'
+            f'"Select ONLY 1920x1080 (15,00-30,000 kbps bitrate) on creative",'
+            f'"CHECK DIMENSIONS"))))))'
+        ),
+        13: (
+            f'=IF(H{r}="","100%",'
+            f'IF(COUNTIF(\'{ROTATION_SHEET}\'!A:A,H{r})>0,'
+            f'"SEE MULTI TAB",'
+            f'IFERROR(IF(COUNTIF(\'{ROTATION_SHEET}\'!A:A,'
+            f'LEFT(H{r},FIND(",",H{r})-1))>0,'
+            f'"SEE MULTI TAB","100%"),"100%")))'
+        ),
+        14: (
+            f'=IF(AND(\'{PRISMA_SHEET}\'!W{p}="",'
+            f'\'{PRISMA_SHEET}\'!W{p}=""),"",'
+            f'IF(\'{PRISMA_SHEET}\'!W{p}="",'
+            f'"DELETE BLANK COLUMN Q - SEE INSTRUCTION TAB",'
+            f'\'{PRISMA_SHEET}\'!W{p}))'
+        ),
+        15: (
+            f'=IF(AND(\'{PRISMA_SHEET}\'!X{p}="",'
+            f'\'{PRISMA_SHEET}\'!X{p}=""),"",'
+            f'IF(\'{PRISMA_SHEET}\'!X{p}="",'
+            f'"DELETE BLANK COLUMN Q - SEE INSTRUCTION TAB",'
+            f'\'{PRISMA_SHEET}\'!X{p}))'
+        ),
+    }
+
+
+def populate_pulte_normal(
     workbook,
     records: list[dict[str, str]],
     creative_files: Iterable,
@@ -510,72 +592,101 @@ def populate_normal_pulte_sheet(
 
     sheet = workbook[TRAFFIC_SHEET]
 
-    _clear_old_manual_traffic_data(sheet)
-    _prepare_traffic_rows(sheet, len(records))
-    _clear_old_rotation_data(workbook)
+    # Preserve one clean style row before clearing old output.
+    style_source_row = TRAFFIC_FIRST_DATA_ROW
+    style_snapshot = {}
 
-    creatives = _creative_names(creative_files)
-    urls = _parse_full_urls(complete_urls_text)
+    for column in range(1, TRAFFIC_LAST_COLUMN + 1):
+        cell = sheet.cell(style_source_row, column)
+        style_snapshot[column] = {
+            "style": copy(cell._style),
+            "number_format": cell.number_format,
+            "font": copy(cell.font),
+            "fill": copy(cell.fill),
+            "border": copy(cell.border),
+            "alignment": copy(cell.alignment),
+            "protection": copy(cell.protection),
+        }
+
+    source_height = sheet.row_dimensions[style_source_row].height
+
+    _clear_old_traffic_rows(sheet)
+    _clear_rotation_sheet(workbook)
+
+    creative_names = _creative_file_names(creative_files)
+    url_lines = _parse_complete_urls(complete_urls_text)
     warnings: list[str] = []
 
     for index, record in enumerate(records):
-        row = TRAFFIC_FIRST_DATA_ROW + index
-        placement_name = _clean(record.get("Placement Name"))
+        traffic_row = TRAFFIC_FIRST_DATA_ROW + index
+        prisma_row = int(record["_source_excel_row"])
+        placement_name = record["Placement Name"]
 
+        # Restore the template formatting.
+        for column in range(1, TRAFFIC_LAST_COLUMN + 1):
+            target = sheet.cell(traffic_row, column)
+            snapshot = style_snapshot[column]
+            target._style = copy(snapshot["style"])
+            target.number_format = snapshot["number_format"]
+            target.font = copy(snapshot["font"])
+            target.fill = copy(snapshot["fill"])
+            target.border = copy(snapshot["border"])
+            target.alignment = copy(snapshot["alignment"])
+            target.protection = copy(snapshot["protection"])
+
+        sheet.row_dimensions[traffic_row].height = source_height
+
+        # Formula-driven columns.
+        for column, formula in _traffic_formulas(
+            traffic_row=traffic_row,
+            prisma_row=prisma_row,
+        ).items():
+            sheet.cell(traffic_row, column).value = formula
+
+        # Manual columns.
         ad_name = build_ad_name(placement_name)
         creative_name = match_creative(
-            creatives,
+            creative_names,
             placement_name,
         )
-        full_url = match_full_url(
-            urls,
-            placement_name,
+        complete_url = match_complete_url(
+            url_lines=url_lines,
+            placement_name=placement_name,
+            ad_name=ad_name,
+            placement_index=index,
+            total_placements=len(records),
         )
 
-        sheet.cell(row=row, column=AD_NAME_COLUMN).value = ad_name
-        sheet.cell(row=row, column=ACTION_COLUMN).value = "New"
-        sheet.cell(row=row, column=CREATIVE_COLUMN).value = creative_name
-        sheet.cell(row=row, column=STUDIO_COLUMN).value = "N"
-        sheet.cell(row=row, column=CLICK_URL_COLUMN).value = full_url
+        sheet.cell(traffic_row, 8).value = ad_name       # H: AD Name
+        sheet.cell(traffic_row, 10).value = "New"       # J: Action
+        sheet.cell(traffic_row, 11).value = creative_name  # K
+        sheet.cell(traffic_row, 12).value = "N"         # L
+        sheet.cell(traffic_row, 16).value = complete_url  # P
 
         if not creative_name:
             warnings.append(
                 f"No creative matched: {placement_name}"
             )
+        else:
+            placement_dimension = _find_dimension(placement_name)
+            creative_dimension = _find_dimension(creative_name)
 
-        expected_dimension = _find_dimension(placement_name)
-        creative_dimension = _find_dimension(creative_name)
+            if (
+                placement_dimension
+                and creative_dimension
+                and placement_dimension.lower()
+                != creative_dimension.lower()
+            ):
+                warnings.append(
+                    f"Dimension mismatch — placement "
+                    f"{placement_dimension}, creative "
+                    f"{creative_dimension}: {placement_name}"
+                )
 
-        if (
-            creative_name
-            and expected_dimension
-            and creative_dimension
-            and expected_dimension.lower()
-            != creative_dimension.lower()
-        ):
-            warnings.append(
-                "Dimension mismatch: "
-                f"{expected_dimension} placement vs "
-                f"{creative_dimension} creative — {placement_name}"
-            )
-
-        if not full_url:
+        if not complete_url:
             warnings.append(
                 f"No complete URL/UTM matched: {placement_name}"
             )
-
-    # Remove stale manual values beyond the current number of placements.
-    current_last_row = TRAFFIC_FIRST_DATA_ROW + len(records) - 1
-
-    for row in range(current_last_row + 1, max(sheet.max_row, 5000) + 1):
-        for column in (
-            AD_NAME_COLUMN,
-            ACTION_COLUMN,
-            CREATIVE_COLUMN,
-            STUDIO_COLUMN,
-            16, 17, 18, 19, 20, 21, 22, 23,
-        ):
-            sheet.cell(row=row, column=column).value = None
 
     return warnings
 
@@ -585,12 +696,23 @@ def generate_normal_pulte_tsheet(
     creative_files,
     complete_urls_text: str,
 ) -> tuple[bytes, list[str]]:
+    """
+    Entry point used by Tsheet.py.
+
+    Normal Pulte rules:
+      - Uses the same master_template.xlsm as every other account.
+      - Uses the complete URL/UTM supplied by the team.
+      - Never generates, appends, or changes the UTM.
+      - Generates Ad Name.
+      - Matches Creative File Name.
+      - Keeps the template's CHECK DIMENSION formula.
+    """
     if not MASTER_TEMPLATE.exists():
         raise FileNotFoundError(
-            f"Master template not found: {MASTER_TEMPLATE.name}"
+            f"{MASTER_TEMPLATE.name} was not found in the GitHub repository."
         )
 
-    raw_rows, records = read_prisma_csv(prisma_file)
+    raw_rows, records = read_prisma_export(prisma_file)
 
     workbook = load_workbook(
         MASTER_TEMPLATE,
@@ -602,12 +724,20 @@ def generate_normal_pulte_tsheet(
         raw_rows,
     )
 
-    warnings = populate_normal_pulte_sheet(
+    warnings = populate_pulte_normal(
         workbook=workbook,
         records=records,
         creative_files=creative_files,
         complete_urls_text=complete_urls_text,
     )
+
+    # Ask Excel to recalculate formulas when the downloaded file is opened.
+    try:
+        workbook.calculation.fullCalcOnLoad = True
+        workbook.calculation.forceFullCalc = True
+        workbook.calculation.calcMode = "auto"
+    except Exception:
+        pass
 
     output = io.BytesIO()
     workbook.save(output)
