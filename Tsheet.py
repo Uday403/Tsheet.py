@@ -1,11 +1,12 @@
 import streamlit as st
 
+from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 
 
 ACCOUNT_NAMES = [
-    "Pulte VIP",
     "Pulte",
+    "Pulte VIP",
     "Anthem / Elevance",
     "UPS Store",
     "Hyatt",
@@ -46,43 +47,120 @@ selected_account = st.selectbox(
     index=0,
 )
 
-if selected_account == "Pulte VIP":
-    st.success("Pulte VIP automation is ready.")
 
-    prisma_file = st.file_uploader(
+def common_upload_fields(key_prefix: str):
+    prisma = st.file_uploader(
         "Upload Prisma CSV",
-        type=["csv"],
-        key="pulte_prisma",
+        type=["csv", "txt"],
+        key=f"{key_prefix}_prisma",
     )
 
-    creative_files = st.file_uploader(
+    creatives = st.file_uploader(
         "Upload Creative Files",
         type=["jpg", "jpeg", "png", "gif"],
         accept_multiple_files=True,
-        key="pulte_creatives",
+        key=f"{key_prefix}_creatives",
     )
 
-    landing_urls_text = st.text_area(
-        "Paste Landing URLs",
-        placeholder="Paste one landing URL per line",
-        height=140,
+    return prisma, creatives
+
+
+if selected_account == "Pulte":
+    st.success("Normal Pulte automation is ready.")
+
+    st.info(
+        "Paste the complete URLs/UTMs exactly as provided by the team. "
+        "The dashboard will not create or modify the UTM."
+    )
+
+    prisma_file, creative_files = common_upload_fields("pulte")
+
+    complete_urls_text = st.text_area(
+        "Paste Complete URLs / UTMs",
+        placeholder="Paste one complete URL per line",
+        height=160,
+        key="pulte_urls",
     )
 
     output_name = st.text_input(
         "Output File Name",
         value="Pulte_Tsheet.xlsm",
+        key="pulte_output",
     )
 
     if not output_name.lower().endswith(".xlsm"):
-        output_name = f"{output_name}.xlsm"
+        output_name += ".xlsm"
 
-    generate_clicked = st.button(
+    if st.button(
         "Generate Pulte T-Sheet",
         type="primary",
         use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        elif not creative_files:
+            st.error("Please upload at least one creative file.")
+        elif not complete_urls_text.strip():
+            st.error("Please paste the complete URLs/UTMs.")
+        else:
+            try:
+                with st.spinner("Generating the normal Pulte T-Sheet..."):
+                    output_bytes, warnings = (
+                        generate_normal_pulte_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            complete_urls_text=complete_urls_text,
+                        )
+                    )
+
+                st.success("Pulte T-Sheet generated successfully.")
+
+                if warnings:
+                    with st.expander("Review matching and dimension warnings"):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download Pulte T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+elif selected_account == "Pulte VIP":
+    st.success("Pulte VIP automation is ready.")
+
+    prisma_file, creative_files = common_upload_fields("pulte_vip")
+
+    landing_urls_text = st.text_area(
+        "Paste Landing URLs",
+        placeholder="Paste one landing URL per line",
+        height=160,
+        key="pulte_vip_urls",
     )
 
-    if generate_clicked:
+    output_name = st.text_input(
+        "Output File Name",
+        value="Pulte_VIP_Tsheet.xlsm",
+        key="pulte_vip_output",
+    )
+
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Pulte VIP T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
         if prisma_file is None:
             st.error("Please upload the Prisma CSV.")
         elif not creative_files:
@@ -91,14 +169,14 @@ if selected_account == "Pulte VIP":
             st.error("Please paste at least one landing URL.")
         else:
             try:
-                with st.spinner("Generating the Pulte trafficking sheet..."):
+                with st.spinner("Generating the Pulte VIP T-Sheet..."):
                     output_bytes, warnings = generate_pulte_tsheet(
                         prisma_file=prisma_file,
                         creative_files=creative_files,
                         landing_urls_text=landing_urls_text,
                     )
 
-                st.success("Pulte trafficking sheet generated successfully.")
+                st.success("Pulte VIP T-Sheet generated successfully.")
 
                 if warnings:
                     with st.expander("Review warnings"):
@@ -106,15 +184,19 @@ if selected_account == "Pulte VIP":
                             st.warning(warning)
 
                 st.download_button(
-                    label="Download Pulte T-Sheet",
+                    "Download Pulte VIP T-Sheet",
                     data=output_bytes,
                     file_name=output_name,
-                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
                     use_container_width=True,
                 )
 
             except Exception as exc:
                 st.exception(exc)
+
 
 else:
     st.info(
