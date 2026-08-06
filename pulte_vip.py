@@ -18,7 +18,8 @@ PRISMA_SHEET = "Prisma Export - Paste as values"
 TRAFFIC_SHEET = "Traffic_Doc"
 ROTATION_SHEET = "Multi-Ad or Creative Rotation"
 
-TRAFFIC_START_ROW = 8
+TEMPLATE_ROW = 8
+OUTPUT_START_ROW = 9
 TRAFFIC_LAST_COLUMN = 24
 
 
@@ -138,7 +139,7 @@ def clear_old_template_data(workbook) -> None:
         max_row = max(sheet.max_row, 5000)
 
         for row in sheet.iter_rows(
-            min_row=TRAFFIC_START_ROW,
+            min_row=OUTPUT_START_ROW,
             max_row=max_row,
             min_col=1,
             max_col=TRAFFIC_LAST_COLUMN,
@@ -642,10 +643,15 @@ def populate_traffic_sheet(
     campaign_name = _campaign_name_from_raw_rows(raw_rows)
     sheet["B1"] = campaign_name
 
-    template_row = TRAFFIC_START_ROW
+    # Row 8 is used only as the formatting template.
+    # Clear any old campaign values so they never appear in the output.
+    for column in range(1, TRAFFIC_LAST_COLUMN + 1):
+        sheet.cell(row=TEMPLATE_ROW, column=column).value = None
+
+    template_row = TEMPLATE_ROW
 
     for index, record in enumerate(records):
-        output_row = TRAFFIC_START_ROW + index
+        output_row = OUTPUT_START_ROW + index
         _copy_row_format(sheet, template_row, output_row)
 
         placement_name = _clean(record.get("Placement Name"))
@@ -719,6 +725,17 @@ def populate_traffic_sheet(
 
         for column, value in enumerate(values, start=1):
             sheet.cell(row=output_row, column=column, value=value)
+
+    # Clear any leftover rows from an older, longer campaign.
+    first_unused_row = OUTPUT_START_ROW + len(records)
+    for row in sheet.iter_rows(
+        min_row=first_unused_row,
+        max_row=max(sheet.max_row, first_unused_row),
+        min_col=1,
+        max_col=TRAFFIC_LAST_COLUMN,
+    ):
+        for cell in row:
+            cell.value = None
 
     return warnings
 
