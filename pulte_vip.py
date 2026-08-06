@@ -18,8 +18,7 @@ PRISMA_SHEET = "Prisma Export - Paste as values"
 TRAFFIC_SHEET = "Traffic_Doc"
 ROTATION_SHEET = "Multi-Ad or Creative Rotation"
 
-TEMPLATE_ROW = 8
-OUTPUT_START_ROW = 9
+TRAFFIC_START_ROW = 8
 TRAFFIC_LAST_COLUMN = 24
 
 
@@ -137,16 +136,20 @@ def clear_old_template_data(workbook) -> None:
     if TRAFFIC_SHEET in workbook.sheetnames:
         sheet = workbook[TRAFFIC_SHEET]
         max_row = max(sheet.max_row, 5000)
+        max_col = max(sheet.max_column, 40)
 
+        # Remove every old campaign value from the first data row onward.
+        # Formatting, borders, widths and styles remain unchanged.
         for row in sheet.iter_rows(
-            min_row=OUTPUT_START_ROW,
+            min_row=TRAFFIC_START_ROW,
             max_row=max_row,
             min_col=1,
-            max_col=TRAFFIC_LAST_COLUMN,
+            max_col=max_col,
         ):
             for cell in row:
                 cell.value = None
 
+        # Remove old campaign-level values as well.
         for coordinate in ("B1", "B2", "B4", "B5"):
             sheet[coordinate] = None
 
@@ -643,16 +646,15 @@ def populate_traffic_sheet(
     campaign_name = _campaign_name_from_raw_rows(raw_rows)
     sheet["B1"] = campaign_name
 
-    # Row 8 is used only as the formatting template.
-    # Clear any old campaign values so they never appear in the output.
-    for column in range(1, TRAFFIC_LAST_COLUMN + 1):
-        sheet.cell(row=TEMPLATE_ROW, column=column).value = None
-
-    template_row = TEMPLATE_ROW
+    template_row = TRAFFIC_START_ROW
 
     for index, record in enumerate(records):
-        output_row = OUTPUT_START_ROW + index
+        output_row = TRAFFIC_START_ROW + index
         _copy_row_format(sheet, template_row, output_row)
+
+        # Guarantee there is no old value left in this output row.
+        for column in range(1, max(sheet.max_column, 40) + 1):
+            sheet.cell(row=output_row, column=column).value = None
 
         placement_name = _clean(record.get("Placement Name"))
         supplier_name = (
@@ -726,13 +728,13 @@ def populate_traffic_sheet(
         for column, value in enumerate(values, start=1):
             sheet.cell(row=output_row, column=column, value=value)
 
-    # Clear any leftover rows from an older, longer campaign.
-    first_unused_row = OUTPUT_START_ROW + len(records)
+    # Remove any remaining rows from an older, longer campaign.
+    first_unused_row = TRAFFIC_START_ROW + len(records)
     for row in sheet.iter_rows(
         min_row=first_unused_row,
         max_row=max(sheet.max_row, first_unused_row),
         min_col=1,
-        max_col=TRAFFIC_LAST_COLUMN,
+        max_col=max(sheet.max_column, 40),
     ):
         for cell in row:
             cell.value = None
