@@ -18,7 +18,7 @@ PRISMA_SHEET = "Prisma Export - Paste as values"
 TRAFFIC_SHEET = "Traffic_Doc"
 ROTATION_SHEET = "Multi-Ad or Creative Rotation"
 
-TRAFFIC_START_ROW = 8
+TRAFFIC_START_ROW = 7
 TRAFFIC_LAST_COLUMN = 24
 
 
