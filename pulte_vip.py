@@ -242,36 +242,7 @@ def _lookup_code(
     value: str,
     default: str = "NA-_-",
 ) -> str:
-    """
-    Resolve either the full tracking value OR its tracking abbreviation.
-
-    Examples:
-      Sarasota -> SAR-_-
-      SAR      -> SAR-_-
-      Exterior-Daylight -> EXTD-_-
-      EXTD              -> EXTD-_-
-
-    This prevents valid abbreviations already present in a placement/creative
-    name from falling back to NA.
-    """
-    section_lookup = lookup.get(section, {})
-    normalized_value = _normalize(value)
-
-    if not normalized_value:
-        return default
-
-    # Normal lookup by the descriptive value from ChannelTrackingValues.
-    direct_match = section_lookup.get(normalized_value)
-    if direct_match:
-        return direct_match
-
-    # Also allow the placement to already contain the tracking abbreviation.
-    # Example: SAR should match SAR-_- and EXTD should match EXTD-_-.
-    for tracking_code in section_lookup.values():
-        if _normalize(tracking_code) == normalized_value:
-            return tracking_code
-
-    return default
+    return lookup.get(section, {}).get(_normalize(value), default)
 
 
 def _find_dimension(placement_name: str) -> str:
@@ -582,7 +553,13 @@ def build_cmp_code(
     medium_code = _lookup_code(lookup, "Medium", "Endemic")
     source_code = _lookup_code(lookup, "Source", parsed["source"])
     division_code = _lookup_code(lookup, "Division", parsed["division"])
-    region_code = _lookup_code(lookup, "Region", parsed["region"])
+    region_value = _clean(parsed["region"])
+    # Preserve an approved region abbreviation already present in placement taxonomy.
+    # Example: SAR -> SAR-_-
+    if re.fullmatch(r"[A-Z]{2,5}", region_value):
+        region_code = f"{region_value}-_-"
+    else:
+        region_code = _lookup_code(lookup, "Region", region_value)
 
     content_value = parsed["brand"]
     content_code = _lookup_code(lookup, "Content", content_value, "NA")
@@ -595,7 +572,12 @@ def build_cmp_code(
         parsed["campaign"],
     )
     vendor_code = _lookup_code(lookup, "Vendor", "Assembly")
-    image_code = _lookup_code(lookup, "Image", image_type)
+    # Image type comes directly from placement/creative taxonomy.
+    # Example: EXTD -> EXTD-_-
+    if image_type and image_type != "NA":
+        image_code = f"{image_type}-_-"
+    else:
+        image_code = _lookup_code(lookup, "Image", image_type)
 
     return "".join(
         [
