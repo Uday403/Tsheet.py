@@ -44,9 +44,19 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Traffic Sheet Generator")
-st.caption(
-    "Select an account and generate the required trafficking sheet."
+header_left, header_right = st.columns([4, 1])
+
+with header_left:
+    st.title("Traffic Sheet Generator")
+    st.caption(
+        "Select an account and generate the required trafficking sheet."
+    )
+
+with header_right:
+    st.image(
+        "assembly_Logo.png",
+        width=220,
+    )
 )
 
 selected_account = st.selectbox(
