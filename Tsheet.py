@@ -44,6 +44,7 @@ st.set_page_config(
     layout="wide",
 )
 
+# Header with Assembly logo
 header_left, header_right = st.columns([4, 1])
 
 with header_left:
@@ -57,14 +58,12 @@ with header_right:
         "assembly_Logo.png",
         width=220,
     )
-)
 
 selected_account = st.selectbox(
     "Select Account",
     ACCOUNT_NAMES,
     index=0,
 )
-
 
 def common_upload_fields(
     key_prefix: str,
