@@ -492,15 +492,19 @@ elif selected_account == "Simon VIP":
     st.success("Simon VIP automation is ready.")
 
     st.info(
-        "Simon VIP rules: Placement Name = Ad Name. "
-        "Paste Outlet Name and UTM side by side from Excel. "
+        "Simon VIP does not use Prisma. Paste the Placement taxonomy "
+        "directly below. Placement Name = Ad Name. "
         "If no creatives are uploaded, Tracking_1x1 will be used."
     )
 
-    prisma_file = st.file_uploader(
-        "Upload Prisma CSV",
-        type=["csv", "txt"],
-        key="simon_vip_prisma",
+    placement_text = st.text_area(
+        "Paste Placement Names / Taxonomy",
+        placeholder=(
+            "Paste one Placement Name per line\n"
+            "Example: Simon_..._Arundel Mills_..._300x250"
+        ),
+        height=220,
+        key="simon_vip_placements",
     )
 
     creative_files = st.file_uploader(
@@ -532,10 +536,10 @@ elif selected_account == "Simon VIP":
 
     preview = None
 
-    if prisma_file is not None and outlet_utm_text.strip():
+    if placement_text.strip() and outlet_utm_text.strip():
         try:
             preview = preview_simon_vip_setup(
-                prisma_file=prisma_file,
+                placement_text=placement_text,
                 creative_files=creative_files,
                 outlet_utm_text=outlet_utm_text,
             )
@@ -603,8 +607,10 @@ elif selected_account == "Simon VIP":
         type="primary",
         use_container_width=True,
     ):
-        if prisma_file is None:
-            st.error("Please upload the Prisma CSV.")
+        if not placement_text.strip():
+            st.error(
+                "Please paste the Placement taxonomy."
+            )
 
         elif not outlet_utm_text.strip():
             st.error(
@@ -618,7 +624,7 @@ elif selected_account == "Simon VIP":
                 ):
                     output_bytes, warnings = (
                         generate_simon_vip_tsheet(
-                            prisma_file=prisma_file,
+                            placement_text=placement_text,
                             creative_files=creative_files,
                             outlet_utm_text=outlet_utm_text,
                         )
@@ -648,6 +654,7 @@ elif selected_account == "Simon VIP":
 
             except Exception as exc:
                 st.exception(exc)
+
 
 
 else:
