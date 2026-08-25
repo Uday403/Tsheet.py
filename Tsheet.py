@@ -534,14 +534,29 @@ elif selected_account == "Simon VIP":
         key="simon_vip_utm",
     )
 
+    outlet_date_text = st.text_area(
+        "Paste Outlet Name + Start Date + End Date",
+        placeholder=(
+            "Arundel Mills\t08/01/2026\t08/31/2026\n"
+            "Desert Hills Premium Outlets\t08/01/2026\t08/31/2026"
+        ),
+        height=180,
+        key="simon_vip_dates",
+    )
+
     preview = None
 
-    if placement_text.strip() and outlet_utm_text.strip():
+    if (
+        placement_text.strip()
+        and outlet_utm_text.strip()
+        and outlet_date_text.strip()
+    ):
         try:
             preview = preview_simon_vip_setup(
                 placement_text=placement_text,
                 creative_files=creative_files,
                 outlet_utm_text=outlet_utm_text,
+                outlet_date_text=outlet_date_text,
             )
 
             metric_col1, metric_col2, metric_col3 = st.columns(3)
@@ -582,6 +597,10 @@ elif selected_account == "Simon VIP":
                     st.caption(
                         f"Creative: {row['creative'] or 'Not matched'}"
                     )
+                    st.caption(
+                        f"Dates: {row['start_date'] or 'Not matched'} "
+                        f"to {row['end_date'] or 'Not matched'}"
+                    )
 
             if preview["warnings"]:
                 with st.expander("Simon VIP Preview Warnings"):
@@ -617,6 +636,11 @@ elif selected_account == "Simon VIP":
                 "Please paste Outlet Name and UTM mapping."
             )
 
+        elif not outlet_date_text.strip():
+            st.error(
+                "Please paste Outlet Name, Start Date and End Date mapping."
+            )
+
         else:
             try:
                 with st.spinner(
@@ -627,6 +651,7 @@ elif selected_account == "Simon VIP":
                             placement_text=placement_text,
                             creative_files=creative_files,
                             outlet_utm_text=outlet_utm_text,
+                            outlet_date_text=outlet_date_text,
                         )
                     )
 
