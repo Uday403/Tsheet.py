@@ -1,14 +1,12 @@
+
 from __future__ import annotations
 
-import csv
 import io
 import re
 import zipfile
 from copy import copy
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable
-
 
 from openpyxl import load_workbook
 
@@ -16,215 +14,58 @@ from openpyxl import load_workbook
 BASE_DIR = Path(__file__).resolve().parent
 MASTER_TEMPLATE = BASE_DIR / "master_template.xlsm"
 
-PRISMA_SHEET = "Prisma Export - Paste as values"
 TRAFFIC_SHEET = "Traffic_Doc"
 MULTI_SHEET = "Multi-Ad or Creative Rotation"
 
 TRACKING_1X1 = "Tracking_1x1"
 
 
-# ============================================================
-# BASIC HELPERS
-# ============================================================
-
 def _clean(value) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+    return "" if value is None else str(value).strip()
 
 
 def _normalize(value) -> str:
-    """
-    Used for matching outlet names / placement text.
-
-    Example:
-      "Arundel Mills" -> "arundelmills"
-      "ARUNDEL_MILLS" -> "arundelmills"
-    """
     return re.sub(r"[^a-z0-9]+", "", _clean(value).lower())
 
 
 def _words(value) -> list[str]:
-    return [
-        word
-        for word in re.findall(r"[A-Za-z0-9]+", _clean(value).lower())
-        if word
-    ]
-
-
-def _read_uploaded_bytes(uploaded_file) -> bytes:
-    uploaded_file.seek(0)
-    return uploaded_file.read()
-
-
-def _decode_text(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-
-    return data.decode("utf-8", errors="replace")
+    return re.findall(r"[A-Za-z0-9]+", _clean(value).lower())
 
 
 # ============================================================
-# PRISMA CSV
+# PLACEMENT TAXONOMY INPUT
 # ============================================================
 
-def _read_csv_rows(uploaded_file) -> list[list[str]]:
-    text = _decode_text(_read_uploaded_bytes(uploaded_file))
-
-    try:
-        dialect = csv.Sniffer().sniff(
-            text[:10000],
-            delimiters=",;\t|",
-        )
-        reader = csv.reader(io.StringIO(text), dialect)
-    except csv.Error:
-        reader = csv.reader(io.StringIO(text))
-
-    return [list(row) for row in reader]
-
-
-def _find_prisma_header(
-    raw_rows: list[list[str]],
-) -> tuple[int, list[str]]:
+def parse_placement_taxonomy(placement_text: str) -> list[str]:
     """
-    Looks for Placement Name without depending on a fixed Prisma column.
+    Accepts one placement taxonomy per line.
+    Also works when users paste one Excel column directly.
     """
-    for index, row in enumerate(raw_rows):
-        headers = [_clean(cell).replace("\n", " ") for cell in row]
-        normalized = {_normalize(header) for header in headers if header}
+    placements = []
 
-        if "placementname" in normalized:
-            return index, headers
+    for raw_line in placement_text.splitlines():
+        value = raw_line.strip()
 
-    raise ValueError(
-        "The Prisma header row could not be found. "
-        "The uploaded file must contain a Placement Name column."
-    )
-
-
-def _record_value(
-    record: dict[str, str],
-    *possible_headers: str,
-) -> str:
-    normalized_record = {
-        _normalize(key): value
-        for key, value in record.items()
-    }
-
-    for header in possible_headers:
-        value = normalized_record.get(_normalize(header))
-
-        if value is not None and _clean(value):
-            return _clean(value)
-
-    return ""
-
-
-def read_prisma_export(
-    uploaded_file,
-) -> tuple[list[list[str]], list[dict[str, str]]]:
-    """
-    Returns:
-      raw_rows -> pasted exactly into the Prisma tab
-      records  -> only placement rows used for Traffic_Doc
-    """
-    raw_rows = _read_csv_rows(uploaded_file)
-    header_index, headers = _find_prisma_header(raw_rows)
-
-    records: list[dict[str, str]] = []
-
-    for source_index in range(header_index + 1, len(raw_rows)):
-        source_row = raw_rows[source_index]
-
-        padded = source_row + [""] * max(
-            0,
-            len(headers) - len(source_row),
-        )
-
-        record = dict(
-            zip(
-                headers,
-                padded[:len(headers)],
-            )
-        )
-
-        placement_name = _record_value(
-            record,
-            "Placement Name",
-            "Placement name",
-        )
-
-        if not placement_name:
+        if not value:
             continue
 
-        row_type = _record_value(
-            record,
-            "Row Type",
-            "Type",
-            "Package / Placement",
-        ).lower()
-
-        if row_type == "package":
+        # Ignore a pasted header.
+        if _normalize(value) in {
+            "placement",
+            "placementname",
+            "placementtaxonomy",
+        }:
             continue
 
-        if placement_name.lower().startswith("package:"):
-            continue
+        placements.append(value)
 
-        record["_placement_name"] = placement_name
-        record["_source_excel_row"] = str(source_index + 1)
-
-        record["_site_name"] = _record_value(
-            record,
-            "Media outlet / Supplier name (ad server)",
-            "Media outlet / Supplier name (Prisma)",
-            "Site Name",
-            "Site name",
-            "Supplier Name",
-            "Vendor",
-        )
-
-        record["_placement_id"] = _record_value(
-            record,
-            "Ad server ID",
-            "Placement ID",
-            "DCM Placement ID",
-            "Ad Server Placement ID",
-        )
-
-        record["_dimension"] = _record_value(
-            record,
-            "Dimensions",
-            "Dimension",
-            "Creative Size",
-            "Creative size",
-            "Size",
-        )
-
-        record["_start_date"] = _record_value(
-            record,
-            "Flight start date",
-            "Start Date",
-            "Placement Start Date",
-        )
-
-        record["_end_date"] = _record_value(
-            record,
-            "Flight end date",
-            "End Date",
-            "Placement End Date",
-        )
-
-        records.append(record)
-
-    if not records:
+    if not placements:
         raise ValueError(
-            "Placement Name was found, but no placement rows were detected."
+            "No placement taxonomy was detected. "
+            "Paste one Placement Name per line."
         )
 
-    return raw_rows, records
+    return placements
 
 
 # ============================================================
@@ -235,16 +76,10 @@ def parse_outlet_utm_mapping(
     outlet_utm_text: str,
 ) -> list[dict[str, str]]:
     """
-    Dashboard input can be pasted directly from two Excel columns:
-
-        Arundel Mills    https://...
-        Desert Hills     https://...
-        Jersey Shore     https://...
-
-    Tab-separated is preferred. Comma and pipe are also accepted.
-    Header rows such as "Outlet Name | UTM" are ignored.
+    Paste two Excel columns:
+        Outlet Name<TAB>UTM
     """
-    mappings: list[dict[str, str]] = []
+    mappings = []
 
     for raw_line in outlet_utm_text.splitlines():
         line = raw_line.strip()
@@ -254,19 +89,11 @@ def parse_outlet_utm_mapping(
 
         cells = []
 
-        # Excel copy/paste will normally be tab-separated.
         if "\t" in line:
-            cells = line.split("\t")
-
+            cells = line.split("\t", 1)
         elif "|" in line:
             cells = line.split("|", 1)
-
-        elif "," in line:
-            # Only split once so commas inside URLs are not damaged.
-            cells = line.split(",", 1)
-
         else:
-            # Last fallback: find the first URL in the line.
             match = re.search(r"https?://\S+", line)
 
             if match:
@@ -308,11 +135,11 @@ def parse_outlet_utm_mapping(
 
     if not mappings:
         raise ValueError(
-            "No Outlet / UTM mappings were detected. "
-            "Paste two columns from Excel: Outlet Name and UTM."
+            "No Outlet / UTM mapping was detected. "
+            "Paste Outlet Name and UTM side by side from Excel."
         )
 
-    # Longest outlet names first prevents a short name from stealing a match.
+    # Prefer the longest matching outlet name.
     mappings.sort(
         key=lambda item: len(item["outlet_normalized"]),
         reverse=True,
@@ -325,17 +152,6 @@ def match_outlet_utm(
     placement_name: str,
     mappings: list[dict[str, str]],
 ) -> tuple[str, str]:
-    """
-    Finds the outlet name anywhere inside the Placement Name.
-
-    Example:
-      Mapping outlet = Arundel Mills
-
-      Placement =
-      Simon_Premium Outlet_USA_Arundel Mills_Q3 Tourism_...
-
-      -> matched.
-    """
     normalized_placement = _normalize(placement_name)
 
     matches = [
@@ -350,9 +166,7 @@ def match_outlet_utm(
     if not matches:
         return "", ""
 
-    # mappings are already sorted longest-first.
     best = matches[0]
-
     return best["outlet"], best["url"]
 
 
@@ -372,26 +186,10 @@ def _extract_dimension(value: str) -> str:
     return f"{match.group(1)}x{match.group(2)}"
 
 
-def placement_dimension(record: dict[str, str]) -> str:
-    dimension = _extract_dimension(
-        record.get("_dimension", "")
-    )
-
-    if dimension:
-        return dimension
-
-    return _extract_dimension(
-        record.get("_placement_name", "")
-    )
-
-
 def _creative_file_names(
     creative_files: Iterable | None,
 ) -> list[str]:
-    """
-    Supports individual creatives and ZIP files.
-    """
-    names: list[str] = []
+    names = []
 
     for uploaded_file in creative_files or []:
         file_name = Path(uploaded_file.name).name
@@ -399,10 +197,7 @@ def _creative_file_names(
         if file_name.lower().endswith(".zip"):
             uploaded_file.seek(0)
 
-            with zipfile.ZipFile(
-                uploaded_file,
-                "r",
-            ) as archive:
+            with zipfile.ZipFile(uploaded_file, "r") as archive:
                 for member in archive.namelist():
                     if member.endswith("/"):
                         continue
@@ -411,25 +206,15 @@ def _creative_file_names(
 
                     if name:
                         names.append(name)
-
         else:
             names.append(file_name)
 
-    return list(
-        dict.fromkeys(
-            name
-            for name in names
-            if name
-        )
-    )
+    return list(dict.fromkeys(name for name in names if name))
 
 
 def _creative_content_tokens(
     creative_name: str,
 ) -> set[str]:
-    """
-    Removes dimension and generic file words, leaving useful content words.
-    """
     stem = Path(creative_name).stem
 
     stem = re.sub(
@@ -472,12 +257,9 @@ def _creative_score(
     placement_name: str,
     dimension: str,
 ) -> float:
-    creative_dimension = _extract_dimension(
-        creative_name
-    )
+    creative_dimension = _extract_dimension(creative_name)
 
-    # When placement has a real display dimension,
-    # the creative must have the same dimension.
+    # For normal display sizes, dimension must match.
     if dimension and dimension.lower() != "1x1":
         if not creative_dimension:
             return -1000
@@ -494,29 +276,20 @@ def _creative_score(
     ):
         score += 50
 
-    normalized_placement = _normalize(
-        placement_name
-    )
+    placement_normalized = _normalize(placement_name)
 
-    # Strong content/name matching.
-    for token in _creative_content_tokens(
-        creative_name
-    ):
-        if _normalize(token) in normalized_placement:
+    for token in _creative_content_tokens(creative_name):
+        if _normalize(token) in placement_normalized:
             score += 10
 
-    # Longer chunks get stronger weight.
     stem = Path(creative_name).stem
 
-    for chunk in re.split(
-        r"[_\-\s]+",
-        stem,
-    ):
-        normalized_chunk = _normalize(chunk)
+    for chunk in re.split(r"[_\-\s]+", stem):
+        chunk_normalized = _normalize(chunk)
 
         if (
-            len(normalized_chunk) >= 6
-            and normalized_chunk in normalized_placement
+            len(chunk_normalized) >= 6
+            and chunk_normalized in placement_normalized
         ):
             score += 15
 
@@ -529,12 +302,9 @@ def match_creative(
     dimension: str,
 ) -> tuple[str, list[str]]:
     """
-    Returns:
-      creative name
-      tied candidates (if ambiguous)
-
-    IMPORTANT:
-      If NO creative files were uploaded, caller uses Tracking_1x1.
+    Rules:
+    - If no creatives were uploaded -> Tracking_1x1
+    - If creatives exist -> match by dimension first, then content/name
     """
     if not creative_names:
         return TRACKING_1X1, []
@@ -554,21 +324,15 @@ def match_creative(
         reverse=True,
     )
 
-    valid = [
-        item
-        for item in ranked
-        if item[0] > 0
-    ]
+    valid = [item for item in ranked if item[0] > 0]
 
     if not valid:
-        # If this is genuinely a 1x1 placement, Tracking_1x1 is the safe fallback.
         if dimension.lower() == "1x1":
             return TRACKING_1X1, []
 
         return "", []
 
     best_score = valid[0][0]
-
     tied = [
         name
         for score, name in valid
@@ -582,23 +346,11 @@ def match_creative(
 
 
 # ============================================================
-# TEMPLATE / EXCEL HELPERS
+# EXCEL HELPERS
 # ============================================================
 
-def _find_traffic_layout(
-    sheet,
-) -> tuple[int, int]:
-    """
-    Simon sample:
-      header row = 8
-      first data row = 9
-
-    We find it dynamically so the script does not depend on row 8 forever.
-    """
-    for row in range(
-        1,
-        min(sheet.max_row, 30) + 1,
-    ):
+def _find_traffic_layout(sheet) -> tuple[int, int]:
+    for row in range(1, min(sheet.max_row, 30) + 1):
         placement_header = _clean(
             sheet.cell(row=row, column=4).value
         ).lower()
@@ -625,14 +377,8 @@ def _snapshot_row_format(
 ) -> dict:
     snapshot = {}
 
-    for column in range(
-        1,
-        max_column + 1,
-    ):
-        cell = sheet.cell(
-            row=row_number,
-            column=column,
-        )
+    for column in range(1, max_column + 1):
+        cell = sheet.cell(row=row_number, column=column)
 
         snapshot[column] = {
             "style": copy(cell._style),
@@ -646,9 +392,7 @@ def _snapshot_row_format(
 
     return {
         "cells": snapshot,
-        "height": sheet.row_dimensions[
-            row_number
-        ].height,
+        "height": sheet.row_dimensions[row_number].height,
     }
 
 
@@ -657,35 +401,18 @@ def _apply_row_format(
     row_number: int,
     snapshot: dict,
 ) -> None:
-    for column, style in snapshot[
-        "cells"
-    ].items():
-        cell = sheet.cell(
-            row=row_number,
-            column=column,
-        )
+    for column, style in snapshot["cells"].items():
+        cell = sheet.cell(row=row_number, column=column)
 
-        cell._style = copy(
-            style["style"]
-        )
-        cell.number_format = style[
-            "number_format"
-        ]
+        cell._style = copy(style["style"])
+        cell.number_format = style["number_format"]
         cell.font = copy(style["font"])
         cell.fill = copy(style["fill"])
-        cell.border = copy(
-            style["border"]
-        )
-        cell.alignment = copy(
-            style["alignment"]
-        )
-        cell.protection = copy(
-            style["protection"]
-        )
+        cell.border = copy(style["border"])
+        cell.alignment = copy(style["alignment"])
+        cell.protection = copy(style["protection"])
 
-    sheet.row_dimensions[
-        row_number
-    ].height = snapshot["height"]
+    sheet.row_dimensions[row_number].height = snapshot["height"]
 
 
 def _clear_values(
@@ -705,168 +432,43 @@ def _clear_values(
             cell.value = None
 
 
-def _clear_prisma_sheet(
-    sheet,
-) -> None:
-    _clear_values(
-        sheet,
-        min_row=1,
-        max_row=max(
-            sheet.max_row,
-            200,
-        ),
-        min_col=1,
-        max_col=max(
-            sheet.max_column,
-            60,
-        ),
-    )
-
-
-def _paste_prisma_rows(
-    sheet,
-    raw_rows: list[list[str]],
-) -> None:
-    for row_number, row_values in enumerate(
-        raw_rows,
-        start=1,
-    ):
-        for column_number, value in enumerate(
-            row_values,
-            start=1,
-        ):
-            sheet.cell(
-                row=row_number,
-                column=column_number,
-                value=value,
-            )
-
-
-def _clear_multi_sheet(
-    workbook,
-) -> None:
+def _clear_multi_sheet(workbook) -> None:
     if MULTI_SHEET not in workbook.sheetnames:
         return
 
     sheet = workbook[MULTI_SHEET]
 
-    # Unmerge old rotation blocks first.
-    for merged_range in list(
-        sheet.merged_cells.ranges
-    ):
+    for merged_range in list(sheet.merged_cells.ranges):
         if merged_range.min_row >= 2:
-            sheet.unmerge_cells(
-                str(merged_range)
-            )
+            sheet.unmerge_cells(str(merged_range))
 
     _clear_values(
         sheet,
         min_row=2,
-        max_row=max(
-            sheet.max_row,
-            100,
-        ),
+        max_row=max(sheet.max_row, 100),
         min_col=1,
-        max_col=max(
-            sheet.max_column,
-            16,
-        ),
+        max_col=max(sheet.max_column, 16),
     )
 
 
-def _to_excel_date(
-    value,
-):
-    if value is None:
-        return ""
-
-    if isinstance(
-        value,
-        (
-            datetime,
-        ),
-    ):
-        return value
-
-    text = _clean(value)
-
-    if not text:
-        return ""
-
-    for fmt in (
-        "%m/%d/%Y",
-        "%m-%d-%Y",
-        "%d/%m/%Y",
-        "%d-%m-%Y",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.strptime(
-                text,
-                fmt,
-            )
-        except ValueError:
-            pass
-
-    return text
-
-
-def _campaign_name_from_prisma(
-    raw_rows: list[list[str]],
-) -> str:
-    for row in raw_rows:
-        if not row:
-            continue
-
-        first = _clean(
-            row[0]
-        ).lower()
-
-        if first in {
-            "campaign name",
-            "campaign name:",
-        }:
-            return (
-                _clean(row[1])
-                if len(row) > 1
-                else ""
-            )
-
-    return ""
-
-
 # ============================================================
-# SIMON VIP PREVIEW
+# PREVIEW
 # ============================================================
 
 def preview_simon_vip_setup(
-    prisma_file,
+    placement_text: str,
     creative_files,
     outlet_utm_text: str,
 ) -> dict:
-    _, records = read_prisma_export(
-        prisma_file
-    )
-
-    mappings = parse_outlet_utm_mapping(
-        outlet_utm_text
-    )
-
-    creative_names = _creative_file_names(
-        creative_files
-    )
+    placements = parse_placement_taxonomy(placement_text)
+    mappings = parse_outlet_utm_mapping(outlet_utm_text)
+    creative_names = _creative_file_names(creative_files)
 
     rows = []
     warnings = []
 
-    for record in records:
-        placement_name = record[
-            "_placement_name"
-        ]
-
-        dimension = placement_dimension(
-            record
-        )
+    for placement_name in placements:
+        dimension = _extract_dimension(placement_name)
 
         outlet, url = match_outlet_utm(
             placement_name,
@@ -908,84 +510,85 @@ def preview_simon_vip_setup(
             }
         )
 
-    matched_utm_count = sum(
-        1
-        for row in rows
-        if row["url"]
-    )
+    matched_count = sum(1 for row in rows if row["url"])
 
     return {
         "rows": rows,
-        "outlet_mapping_count": len(
-            mappings
-        ),
-        "placement_count": len(
-            records
-        ),
-        "utm_matched_count": matched_utm_count,
-        "utm_unmatched_count": (
-            len(records)
-            - matched_utm_count
-        ),
-        "creative_count": len(
-            creative_names
-        ),
-        "using_tracking_1x1": (
-            len(creative_names) == 0
-        ),
+        "outlet_mapping_count": len(mappings),
+        "placement_count": len(placements),
+        "utm_matched_count": matched_count,
+        "utm_unmatched_count": len(placements) - matched_count,
+        "creative_count": len(creative_names),
+        "using_tracking_1x1": len(creative_names) == 0,
         "warnings": warnings,
     }
 
 
 # ============================================================
-# GENERATE TRAFFIC DOC
+# GENERATION
 # ============================================================
 
-def _populate_traffic_doc(
-    workbook,
-    records: list[dict[str, str]],
-    creative_names: list[str],
-    mappings: list[dict[str, str]],
-) -> list[str]:
-    sheet = workbook[
-        TRAFFIC_SHEET
-    ]
-
-    _, first_data_row = (
-        _find_traffic_layout(sheet)
-    )
-
-    max_column = max(
-        sheet.max_column,
-        24,
-    )
-
-    # Preserve style BEFORE clearing old data.
-    style_snapshot = (
-        _snapshot_row_format(
-            sheet,
-            first_data_row,
-            max_column,
+def generate_simon_vip_tsheet(
+    placement_text: str,
+    creative_files,
+    outlet_utm_text: str,
+) -> tuple[bytes, list[str]]:
+    """
+    Simon VIP:
+    - NO Prisma input
+    - Placement taxonomy pasted directly in dashboard
+    - Placement Name = Ad Name
+    - Outlet name inside Placement Name determines provided UTM
+    - If no creatives -> Tracking_1x1
+    - If creatives -> dimension + content/name matching
+    """
+    if not MASTER_TEMPLATE.exists():
+        raise FileNotFoundError(
+            f"Master template not found: {MASTER_TEMPLATE.name}"
         )
+
+    placements = parse_placement_taxonomy(placement_text)
+    mappings = parse_outlet_utm_mapping(outlet_utm_text)
+    creative_names = _creative_file_names(creative_files)
+
+    workbook = load_workbook(
+        MASTER_TEMPLATE,
+        keep_vba=True,
     )
 
-    # Completely remove old campaign values.
+    if TRAFFIC_SHEET not in workbook.sheetnames:
+        raise KeyError(
+            f"Missing worksheet in master template: {TRAFFIC_SHEET}"
+        )
+
+    sheet = workbook[TRAFFIC_SHEET]
+    _, first_data_row = _find_traffic_layout(sheet)
+
+    max_column = max(sheet.max_column, 24)
+
+    style_snapshot = _snapshot_row_format(
+        sheet,
+        first_data_row,
+        max_column,
+    )
+
+    # Remove every old Traffic_Doc row value.
     _clear_values(
         sheet,
         min_row=first_data_row,
         max_row=max(
             sheet.max_row,
-            first_data_row + len(records) + 10,
+            first_data_row + len(placements) + 10,
         ),
         min_col=1,
         max_col=max_column,
     )
 
-    warnings: list[str] = []
+    _clear_multi_sheet(workbook)
 
-    for index, record in enumerate(
-        records
-    ):
+    warnings = []
+
+    for index, placement_name in enumerate(placements):
         row = first_data_row + index
 
         _apply_row_format(
@@ -994,253 +597,44 @@ def _populate_traffic_doc(
             style_snapshot,
         )
 
-        placement_name = record[
-            "_placement_name"
-        ]
+        dimension = _extract_dimension(placement_name)
 
-        dimension = placement_dimension(
-            record
+        outlet_name, matched_url = match_outlet_utm(
+            placement_name,
+            mappings,
         )
 
-        outlet_name, matched_url = (
-            match_outlet_utm(
-                placement_name,
-                mappings,
-            )
+        creative_name, tied = match_creative(
+            creative_names=creative_names,
+            placement_name=placement_name,
+            dimension=dimension,
         )
 
-        creative_name, tied = (
-            match_creative(
-                creative_names=creative_names,
-                placement_name=placement_name,
-                dimension=dimension,
-            )
-        )
-
-        # Simon VIP confirmed rule:
-        # Placement Name = Ad Name.
-        ad_name = placement_name
+        # Placement Name = Ad Name
+        sheet.cell(row=row, column=4).value = placement_name
+        sheet.cell(row=row, column=5).value = dimension
+        sheet.cell(row=row, column=8).value = placement_name
+        sheet.cell(row=row, column=10).value = "New"
+        sheet.cell(row=row, column=11).value = creative_name
+        sheet.cell(row=row, column=13).value = "100%"
+        sheet.cell(row=row, column=16).value = matched_url
 
         if not matched_url:
             warnings.append(
-                f"No UTM matched outlet in placement: "
-                f"{placement_name}"
+                f"No UTM matched outlet in placement: {placement_name}"
             )
 
         if tied:
             warnings.append(
-                f"Ambiguous creative match — "
-                f"manual review required: "
+                f"Ambiguous creative match — manual review required: "
                 f"{placement_name} -> "
                 + ", ".join(tied)
             )
 
         if not creative_name:
             warnings.append(
-                f"No creative matched: "
-                f"{placement_name}"
+                f"No creative matched: {placement_name}"
             )
-
-        # ----------------------------------------------------
-        # Traffic_Doc columns based on shared template:
-        # B Site Name
-        # C DCM Placement ID
-        # D Placement Name
-        # E Dimensions
-        # H Ad Name
-        # J Action
-        # K Creative
-        # L Studio Creative
-        # M Rotation
-        # N Start
-        # O End
-        # P URL
-        # ----------------------------------------------------
-
-        sheet.cell(
-            row=row,
-            column=2,
-        ).value = record[
-            "_site_name"
-        ]
-
-        sheet.cell(
-            row=row,
-            column=3,
-        ).value = record[
-            "_placement_id"
-        ]
-
-        sheet.cell(
-            row=row,
-            column=4,
-        ).value = placement_name
-
-        sheet.cell(
-            row=row,
-            column=5,
-        ).value = dimension
-
-        sheet.cell(
-            row=row,
-            column=8,
-        ).value = ad_name
-
-        sheet.cell(
-            row=row,
-            column=10,
-        ).value = "New"
-
-        sheet.cell(
-            row=row,
-            column=11,
-        ).value = creative_name
-
-        # Sample Simon sheet uses no Studio value.
-        sheet.cell(
-            row=row,
-            column=12,
-        ).value = None
-
-        # Single creative rotation.
-        sheet.cell(
-            row=row,
-            column=13,
-        ).value = "100%"
-
-        sheet.cell(
-            row=row,
-            column=14,
-        ).value = _to_excel_date(
-            record["_start_date"]
-        )
-
-        sheet.cell(
-            row=row,
-            column=15,
-        ).value = _to_excel_date(
-            record["_end_date"]
-        )
-
-        sheet.cell(
-            row=row,
-            column=16,
-        ).value = matched_url
-
-    return warnings
-
-
-# ============================================================
-# MAIN ENTRY POINT USED BY Tsheet.py
-# ============================================================
-
-def generate_simon_vip_tsheet(
-    prisma_file,
-    creative_files,
-    outlet_utm_text: str,
-) -> tuple[bytes, list[str]]:
-    """
-    Simon VIP rules implemented:
-
-    1. Placement Name = Ad Name.
-
-    2. Outlet / UTM mapping is pasted from two Excel columns.
-       Outlet name is matched anywhere inside Placement Name.
-
-    3. If creative files are uploaded:
-       - match by placement dimension
-       - then content/name similarity.
-
-    4. If NO creatives are uploaded:
-       - Creative File Name = Tracking_1x1.
-
-    5. UTM is used exactly as provided.
-       Simon VIP does NOT generate or modify the UTM.
-
-    6. Old Traffic_Doc / Prisma / Multi-tab campaign data is cleared.
-    """
-    if not MASTER_TEMPLATE.exists():
-        raise FileNotFoundError(
-            f"Master template not found: "
-            f"{MASTER_TEMPLATE.name}"
-        )
-
-    raw_rows, records = (
-        read_prisma_export(
-            prisma_file
-        )
-    )
-
-    mappings = (
-        parse_outlet_utm_mapping(
-            outlet_utm_text
-        )
-    )
-
-    creative_names = (
-        _creative_file_names(
-            creative_files
-        )
-    )
-
-    workbook = load_workbook(
-        MASTER_TEMPLATE,
-        keep_vba=True,
-    )
-
-    for required_sheet in (
-        PRISMA_SHEET,
-        TRAFFIC_SHEET,
-    ):
-        if (
-            required_sheet
-            not in workbook.sheetnames
-        ):
-            raise KeyError(
-                f"Missing worksheet in "
-                f"master template: "
-                f"{required_sheet}"
-            )
-
-    # Clear + paste Prisma.
-    prisma_sheet = workbook[
-        PRISMA_SHEET
-    ]
-
-    _clear_prisma_sheet(
-        prisma_sheet
-    )
-
-    _paste_prisma_rows(
-        prisma_sheet,
-        raw_rows,
-    )
-
-    # Remove stale Multi-tab data.
-    _clear_multi_sheet(
-        workbook
-    )
-
-    # Campaign name if Prisma export provides one.
-    campaign_name = (
-        _campaign_name_from_prisma(
-            raw_rows
-        )
-    )
-
-    if campaign_name:
-        workbook[
-            TRAFFIC_SHEET
-        ]["B1"] = campaign_name
-
-    warnings = (
-        _populate_traffic_doc(
-            workbook=workbook,
-            records=records,
-            creative_names=creative_names,
-            mappings=mappings,
-        )
-    )
 
     try:
         workbook.calculation.fullCalcOnLoad = True
@@ -1250,14 +644,7 @@ def generate_simon_vip_tsheet(
         pass
 
     output = io.BytesIO()
-
-    workbook.save(
-        output
-    )
-
+    workbook.save(output)
     output.seek(0)
 
-    return (
-        output.getvalue(),
-        warnings,
-    )
+    return output.getvalue(), warnings
