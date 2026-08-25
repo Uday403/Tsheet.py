@@ -148,6 +148,103 @@ def parse_outlet_utm_mapping(
     return mappings
 
 
+def parse_outlet_date_mapping(
+    outlet_date_text: str,
+) -> list[dict[str, str]]:
+    """
+    Paste three Excel columns:
+        Outlet Name<TAB>Start Date<TAB>End Date
+
+    Example:
+        Arundel Mills    08/01/2026    08/31/2026
+    """
+    mappings = []
+
+    for raw_line in outlet_date_text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if "\t" in line:
+            cells = line.split("\t")
+        elif "|" in line:
+            cells = line.split("|")
+        else:
+            # Space/comma separated text is intentionally not guessed because
+            # outlet names themselves contain spaces.
+            continue
+
+        if len(cells) < 3:
+            continue
+
+        outlet = _clean(cells[0])
+        start_date = _clean(cells[1])
+        end_date = _clean(cells[2])
+
+        if not outlet:
+            continue
+
+        if _normalize(outlet) in {
+            "outlet",
+            "outletname",
+            "property",
+            "propertyname",
+            "mall",
+            "mallname",
+        }:
+            continue
+
+        mappings.append(
+            {
+                "outlet": outlet,
+                "outlet_normalized": _normalize(outlet),
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+
+    if not mappings:
+        raise ValueError(
+            "No Outlet / Start Date / End Date mapping was detected. "
+            "Paste three columns from Excel."
+        )
+
+    mappings.sort(
+        key=lambda item: len(item["outlet_normalized"]),
+        reverse=True,
+    )
+
+    return mappings
+
+
+def match_outlet_dates(
+    placement_name: str,
+    mappings: list[dict[str, str]],
+) -> tuple[str, str, str]:
+    normalized_placement = _normalize(placement_name)
+
+    matches = [
+        mapping
+        for mapping in mappings
+        if (
+            mapping["outlet_normalized"]
+            and mapping["outlet_normalized"] in normalized_placement
+        )
+    ]
+
+    if not matches:
+        return "", "", ""
+
+    best = matches[0]
+
+    return (
+        best["outlet"],
+        best["start_date"],
+        best["end_date"],
+    )
+
+
 def match_outlet_utm(
     placement_name: str,
     mappings: list[dict[str, str]],
@@ -459,9 +556,11 @@ def preview_simon_vip_setup(
     placement_text: str,
     creative_files,
     outlet_utm_text: str,
+    outlet_date_text: str,
 ) -> dict:
     placements = parse_placement_taxonomy(placement_text)
     mappings = parse_outlet_utm_mapping(outlet_utm_text)
+    date_mappings = parse_outlet_date_mapping(outlet_date_text)
     creative_names = _creative_file_names(creative_files)
 
     rows = []
@@ -475,6 +574,11 @@ def preview_simon_vip_setup(
             mappings,
         )
 
+        date_outlet, start_date, end_date = match_outlet_dates(
+            placement_name,
+            date_mappings,
+        )
+
         creative, tied = match_creative(
             creative_names=creative_names,
             placement_name=placement_name,
@@ -484,6 +588,11 @@ def preview_simon_vip_setup(
         if not outlet:
             warnings.append(
                 f"No outlet/UTM match: {placement_name}"
+            )
+
+        if not date_outlet:
+            warnings.append(
+                f"No outlet/date match: {placement_name}"
             )
 
         if tied:
@@ -505,6 +614,8 @@ def preview_simon_vip_setup(
                 "dimension": dimension,
                 "outlet": outlet,
                 "url": url,
+                "start_date": start_date,
+                "end_date": end_date,
                 "creative": creative,
                 "creative_candidates": tied,
             }
@@ -532,6 +643,7 @@ def generate_simon_vip_tsheet(
     placement_text: str,
     creative_files,
     outlet_utm_text: str,
+    outlet_date_text: str,
 ) -> tuple[bytes, list[str]]:
     """
     Simon VIP:
@@ -539,6 +651,7 @@ def generate_simon_vip_tsheet(
     - Placement taxonomy pasted directly in dashboard
     - Placement Name = Ad Name
     - Outlet name inside Placement Name determines provided UTM
+    - Outlet name also determines Start Date and End Date
     - If no creatives -> Tracking_1x1
     - If creatives -> dimension + content/name matching
     """
@@ -549,6 +662,7 @@ def generate_simon_vip_tsheet(
 
     placements = parse_placement_taxonomy(placement_text)
     mappings = parse_outlet_utm_mapping(outlet_utm_text)
+    date_mappings = parse_outlet_date_mapping(outlet_date_text)
     creative_names = _creative_file_names(creative_files)
 
     workbook = load_workbook(
@@ -604,6 +718,11 @@ def generate_simon_vip_tsheet(
             mappings,
         )
 
+        date_outlet, start_date, end_date = match_outlet_dates(
+            placement_name,
+            date_mappings,
+        )
+
         creative_name, tied = match_creative(
             creative_names=creative_names,
             placement_name=placement_name,
@@ -617,11 +736,18 @@ def generate_simon_vip_tsheet(
         sheet.cell(row=row, column=10).value = "New"
         sheet.cell(row=row, column=11).value = creative_name
         sheet.cell(row=row, column=13).value = "100%"
+        sheet.cell(row=row, column=14).value = start_date
+        sheet.cell(row=row, column=15).value = end_date
         sheet.cell(row=row, column=16).value = matched_url
 
         if not matched_url:
             warnings.append(
                 f"No UTM matched outlet in placement: {placement_name}"
+            )
+
+        if not date_outlet:
+            warnings.append(
+                f"No Start/End Date matched outlet in placement: {placement_name}"
             )
 
         if tied:
