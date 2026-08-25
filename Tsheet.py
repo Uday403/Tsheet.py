@@ -8,12 +8,18 @@ from aaa import (
 )
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
+from simon_vip import (
+    generate_simon_vip_tsheet,
+    preview_simon_vip_setup,
+)
+
 
 
 ACCOUNT_NAMES = [
     "Pulte",
     "Pulte VIP",
     "AAA",
+    "Simon VIP",
     "Anthem / Elevance",
     "UPS Store",
     "Hyatt",
@@ -468,6 +474,169 @@ elif selected_account == "AAA":
 
                 st.download_button(
                     "Download AAA T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+
+elif selected_account == "Simon VIP":
+    st.success("Simon VIP automation is ready.")
+
+    st.info(
+        "Simon VIP rules: Placement Name = Ad Name. "
+        "Paste Outlet Name and UTM side by side from Excel. "
+        "If no creatives are uploaded, Tracking_1x1 will be used."
+    )
+
+    prisma_file = st.file_uploader(
+        "Upload Prisma CSV",
+        type=["csv", "txt"],
+        key="simon_vip_prisma",
+    )
+
+    creative_files = st.file_uploader(
+        "Upload Creative Files (optional)",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "gif",
+            "webp",
+            "html",
+            "htm",
+            "mp4",
+            "zip",
+        ],
+        accept_multiple_files=True,
+        key="simon_vip_creatives",
+    )
+
+    outlet_utm_text = st.text_area(
+        "Paste Outlet Name + UTM",
+        placeholder=(
+            "Arundel Mills\thttps://...\n"
+            "Desert Hills Premium Outlets\thttps://..."
+        ),
+        height=220,
+        key="simon_vip_utm",
+    )
+
+    preview = None
+
+    if prisma_file is not None and outlet_utm_text.strip():
+        try:
+            preview = preview_simon_vip_setup(
+                prisma_file=prisma_file,
+                creative_files=creative_files,
+                outlet_utm_text=outlet_utm_text,
+            )
+
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+
+            with metric_col1:
+                st.metric(
+                    "Outlet mappings loaded",
+                    preview["outlet_mapping_count"],
+                )
+
+            with metric_col2:
+                st.metric(
+                    "Placements matched",
+                    preview["utm_matched_count"],
+                )
+
+            with metric_col3:
+                st.metric(
+                    "Unmatched placements",
+                    preview["utm_unmatched_count"],
+                )
+
+            if preview["using_tracking_1x1"]:
+                st.info(
+                    "No creatives uploaded — Tracking_1x1 will be used "
+                    "for all placements."
+                )
+
+            with st.expander(
+                "Simon VIP Matching Preview",
+                expanded=True,
+            ):
+                for row in preview["rows"]:
+                    st.write(f"**{row['placement_name']}**")
+                    st.caption(
+                        f"Outlet: {row['outlet'] or 'Not matched'}"
+                    )
+                    st.caption(
+                        f"Creative: {row['creative'] or 'Not matched'}"
+                    )
+
+            if preview["warnings"]:
+                with st.expander("Simon VIP Preview Warnings"):
+                    for warning in preview["warnings"]:
+                        st.warning(warning)
+
+        except Exception as exc:
+            st.error(
+                f"Unable to preview Simon VIP matching: {exc}"
+            )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Simon_VIP_Tsheet.xlsm",
+        key="simon_vip_output",
+    )
+
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Simon VIP T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+
+        elif not outlet_utm_text.strip():
+            st.error(
+                "Please paste Outlet Name and UTM mapping."
+            )
+
+        else:
+            try:
+                with st.spinner(
+                    "Generating the Simon VIP T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_simon_vip_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            outlet_utm_text=outlet_utm_text,
+                        )
+                    )
+
+                st.success(
+                    "Simon VIP T-Sheet generated successfully."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "Review Simon VIP warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download Simon VIP T-Sheet",
                     data=output_bytes,
                     file_name=output_name,
                     mime=(
