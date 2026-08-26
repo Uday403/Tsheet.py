@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from functools import lru_cache
 from copy import copy
 from pathlib import Path
 from typing import BinaryIO, Iterable
@@ -140,7 +141,7 @@ def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]
 def clear_old_template_data(workbook) -> None:
     if PRISMA_SHEET in workbook.sheetnames:
         sheet = workbook[PRISMA_SHEET]
-        max_row = max(sheet.max_row, 5000)
+        max_row = max(sheet.max_row, 1)
         max_col = max(sheet.max_column, 57)
         for row in sheet.iter_rows(
             min_row=1,
@@ -154,7 +155,7 @@ def clear_old_template_data(workbook) -> None:
     if TRAFFIC_SHEET in workbook.sheetnames:
         sheet = workbook[TRAFFIC_SHEET]
         first_data_row = _traffic_data_start_row(sheet)
-        max_row = max(sheet.max_row, 5000)
+        max_row = max(sheet.max_row, 1)
         max_col = max(sheet.max_column, 40)
 
         # Clear every old trafficking value below the actual header row.
@@ -174,7 +175,7 @@ def clear_old_template_data(workbook) -> None:
 
     if ROTATION_SHEET in workbook.sheetnames:
         sheet = workbook[ROTATION_SHEET]
-        max_row = max(sheet.max_row, 5000)
+        max_row = max(sheet.max_row, 1)
         max_col = max(sheet.max_column, 7)
 
         for row in sheet.iter_rows(
@@ -189,8 +190,8 @@ def clear_old_template_data(workbook) -> None:
     for sheet_name in ("Native - DV360", "Native - TTD", "Native - Oath"):
         if sheet_name in workbook.sheetnames:
             sheet = workbook[sheet_name]
-            max_row = max(sheet.max_row, 5000)
-            max_col = max(sheet.max_column, 10)
+            max_row = max(sheet.max_row, 1)
+            max_col = max(sheet.max_column, 1)
 
             for row in sheet.iter_rows(
                 min_row=2,
@@ -213,6 +214,7 @@ def paste_prisma_export(workbook, raw_rows: list[list[str]]) -> None:
             sheet.cell(row=row_index, column=column_index, value=value)
 
 
+@lru_cache(maxsize=1)
 def _load_tracking_lookup() -> dict[str, dict[str, str]]:
     if not TRACKING_CODES_FILE.exists():
         raise FileNotFoundError(
