@@ -390,6 +390,20 @@ def _division_brand_campaign_community(
 def _region_from_placement(placement_name: str, division: str) -> str:
     parts = _split_placement(placement_name)
 
+    # Some Prisma placement names carry DMA/market abbreviations such as
+    # WLM NC. Those are NOT necessarily the approved CMP abbreviations.
+    # Resolve the placement token to the full tracking-workbook Region name
+    # first, then build_cmp_code() will obtain the approved code (WIL-_-).
+    placement_region_aliases = {
+        "wlm": "wilmington",
+    }
+
+    for part in parts:
+        for token in re.split(r"\s+", part):
+            alias_region = placement_region_aliases.get(_normalize(token))
+            if alias_region:
+                return alias_region
+
     community_id = _community_id(placement_name)
     community_id_index = None
 
