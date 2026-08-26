@@ -1,3 +1,5 @@
+import itertools
+
 import streamlit as st
 
 from aaa import (
@@ -16,6 +18,7 @@ from simon_vip import (
 
 
 ACCOUNT_NAMES = [
+    "Naming Convention Generator",
     "Pulte",
     "Pulte VIP",
     "AAA",
@@ -680,6 +683,92 @@ elif selected_account == "Simon VIP":
             except Exception as exc:
                 st.exception(exc)
 
+
+
+elif selected_account == "Naming Convention Generator":
+    st.success("Naming Convention Generator is ready.")
+    st.info("Copy the complete taxonomy table from Excel, including the header row, and paste it below. Any number of columns and values can be used.")
+
+    taxonomy_text = st.text_area(
+        "Paste Taxonomy Table from Excel",
+        placeholder=(
+            "Header 1\tLOB\tGeo\tCreativeSize\n"
+            "ASM\tTRV\tCA\t300x250\n"
+            "\tINS\tIN\t320x480\n"
+            "\tBrand\tOH\t160x600\n"
+            "\t\tVI\t300x600\n"
+            "\t\tBA\t728x90\n"
+            "\t\t\t970x250"
+        ),
+        height=300,
+        key="naming_taxonomy_table",
+    )
+
+    separator = st.selectbox(
+        "Naming Separator", ["_", "-", "|"], index=0, key="naming_separator"
+    )
+
+    column_values = []
+    usable_columns = []
+    total_combinations = 0
+    table_valid = False
+
+    if taxonomy_text.strip():
+        try:
+            rows = [row.split("\t") for row in taxonomy_text.splitlines() if row.strip()]
+            if len(rows) < 2:
+                st.warning("Paste the header row and at least one row of values.")
+            else:
+                headers = [header.strip() for header in rows[0]]
+                for column_index in range(len(headers)):
+                    values = []
+                    for row in rows[1:]:
+                        if column_index < len(row):
+                            value = row[column_index].strip()
+                            if value and value not in values:
+                                values.append(value)
+                    column_values.append(values)
+
+                usable_columns = [(h, v) for h, v in zip(headers, column_values) if v]
+                if usable_columns:
+                    table_valid = True
+                    st.subheader("Detected Taxonomy")
+                    preview_count = min(len(usable_columns), 4)
+                    preview_columns = st.columns(preview_count)
+                    for index, (header, values) in enumerate(usable_columns):
+                        with preview_columns[index % preview_count]:
+                            st.metric(header or f"Column {index + 1}", len(values))
+                            preview_text = " | ".join(values[:8])
+                            if len(values) > 8:
+                                preview_text += " | ..."
+                            st.caption(preview_text)
+
+                    total_combinations = 1
+                    for _, values in usable_columns:
+                        total_combinations *= len(values)
+                    st.info(f"Total naming conventions that will be generated: {total_combinations:,}")
+                    if total_combinations > 100000:
+                        st.warning("This taxonomy will generate more than 100,000 combinations. Consider reducing the number of values before generating.")
+        except Exception as exc:
+            st.error(f"Unable to read the pasted taxonomy: {exc}")
+
+    if st.button("Generate Naming Conventions", type="primary", use_container_width=True, key="generate_naming_conventions"):
+        if not taxonomy_text.strip():
+            st.error("Please paste the taxonomy table from Excel.")
+        elif not table_valid:
+            st.error("No usable taxonomy values were detected.")
+        elif total_combinations > 500000:
+            st.error("More than 500,000 combinations were detected. Please reduce the taxonomy before generating.")
+        else:
+            try:
+                usable_values = [values for _, values in usable_columns]
+                generated_names = [separator.join(combination) for combination in itertools.product(*usable_values)]
+                output_text = "\n".join(generated_names)
+                st.success(f"{len(generated_names):,} naming conventions generated successfully.")
+                st.text_area("Generated Naming Conventions", value=output_text, height=400, key="naming_generated_output")
+                st.download_button("Download Naming Conventions", data=output_text, file_name="Naming_Conventions.txt", mime="text/plain", use_container_width=True)
+            except Exception as exc:
+                st.exception(exc)
 
 
 else:
