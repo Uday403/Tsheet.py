@@ -18,8 +18,26 @@ PRISMA_SHEET = "Prisma Export - Paste as values"
 TRAFFIC_SHEET = "Traffic_Doc"
 ROTATION_SHEET = "Multi-Ad or Creative Rotation"
 
-TRAFFIC_START_ROW = 7
+TRAFFIC_START_ROW = 8
 TRAFFIC_LAST_COLUMN = 24
+
+
+def _find_traffic_header_row(sheet) -> int:
+    """Find the row containing the Traffic_Doc column headers."""
+    for row_number in range(1, min(sheet.max_row, 30) + 1):
+        values = {
+            _normalize(sheet.cell(row=row_number, column=column).value)
+            for column in range(1, min(sheet.max_column, 40) + 1)
+        }
+        if "adname" in values and "creativefilename" in values:
+            return row_number
+
+    # Existing template fallback.
+    return TRAFFIC_START_ROW - 1
+
+
+def _traffic_data_start_row(sheet) -> int:
+    return _find_traffic_header_row(sheet) + 1
 
 
 def _clean(value) -> str:
@@ -120,17 +138,10 @@ def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]
 
 
 def clear_old_template_data(workbook) -> None:
-    """
-    Remove every old campaign value while preserving workbook structure,
-    formatting, macros and sheet names.
-    """
-
-    # Clear old Prisma export completely.
     if PRISMA_SHEET in workbook.sheetnames:
         sheet = workbook[PRISMA_SHEET]
         max_row = max(sheet.max_row, 5000)
-        max_col = max(sheet.max_column, 60)
-
+        max_col = max(sheet.max_column, 57)
         for row in sheet.iter_rows(
             min_row=1,
             max_row=max_row,
@@ -140,18 +151,31 @@ def clear_old_template_data(workbook) -> None:
             for cell in row:
                 cell.value = None
 
-    # Clear Traffic_Doc campaign-level values.
     if TRAFFIC_SHEET in workbook.sheetnames:
         sheet = workbook[TRAFFIC_SHEET]
+        first_data_row = _traffic_data_start_row(sheet)
+        max_row = max(sheet.max_row, 5000)
+        max_col = max(sheet.max_column, 40)
+
+        # Clear every old trafficking value below the actual header row.
+        # This removes old Ad Names and Creative File Names even when the
+        # template's first data row is not row 8.
+        for row in sheet.iter_rows(
+            min_row=first_data_row,
+            max_row=max_row,
+            min_col=1,
+            max_col=max_col,
+        ):
+            for cell in row:
+                cell.value = None
 
         for coordinate in ("B1", "B2", "B4", "B5"):
             sheet[coordinate] = None
 
-    # Clear Multi-Ad / Creative Rotation.
     if ROTATION_SHEET in workbook.sheetnames:
         sheet = workbook[ROTATION_SHEET]
         max_row = max(sheet.max_row, 5000)
-        max_col = max(sheet.max_column, 10)
+        max_col = max(sheet.max_column, 7)
 
         for row in sheet.iter_rows(
             min_row=2,
@@ -162,12 +186,11 @@ def clear_old_template_data(workbook) -> None:
             for cell in row:
                 cell.value = None
 
-    # Clear optional native tabs.
     for sheet_name in ("Native - DV360", "Native - TTD", "Native - Oath"):
         if sheet_name in workbook.sheetnames:
             sheet = workbook[sheet_name]
             max_row = max(sheet.max_row, 5000)
-            max_col = max(sheet.max_column, 20)
+            max_col = max(sheet.max_column, 10)
 
             for row in sheet.iter_rows(
                 min_row=2,
@@ -553,13 +576,7 @@ def build_cmp_code(
     medium_code = _lookup_code(lookup, "Medium", "Endemic")
     source_code = _lookup_code(lookup, "Source", parsed["source"])
     division_code = _lookup_code(lookup, "Division", parsed["division"])
-    region_value = _clean(parsed["region"])
-    # Preserve an approved region abbreviation already present in placement taxonomy.
-    # Example: SAR -> SAR-_-
-    if re.fullmatch(r"[A-Z]{2,5}", region_value):
-        region_code = f"{region_value}-_-"
-    else:
-        region_code = _lookup_code(lookup, "Region", region_value)
+    region_code = _lookup_code(lookup, "Region", parsed["region"])
 
     content_value = parsed["brand"]
     content_code = _lookup_code(lookup, "Content", content_value, "NA")
@@ -572,12 +589,7 @@ def build_cmp_code(
         parsed["campaign"],
     )
     vendor_code = _lookup_code(lookup, "Vendor", "Assembly")
-    # Image type comes directly from placement/creative taxonomy.
-    # Example: EXTD -> EXTD-_-
-    if image_type and image_type != "NA":
-        image_code = f"{image_type}-_-"
-    else:
-        image_code = _lookup_code(lookup, "Image", image_type)
+    image_code = _lookup_code(lookup, "Image", image_type)
 
     return "".join(
         [
@@ -653,58 +665,12 @@ def populate_traffic_sheet(
     campaign_name = _campaign_name_from_raw_rows(raw_rows)
     sheet["B1"] = campaign_name
 
-    # ---------------------------------------------------------
-    # Preserve the row-8 formatting BEFORE deleting old rows.
-    # ---------------------------------------------------------
-    style_snapshot = {}
-    for column in range(1, TRAFFIC_LAST_COLUMN + 1):
-        source = sheet.cell(row=TRAFFIC_START_ROW, column=column)
-        style_snapshot[column] = {
-            "style": copy(source._style),
-            "number_format": source.number_format,
-            "font": copy(source.font),
-            "fill": copy(source.fill),
-            "border": copy(source.border),
-            "alignment": copy(source.alignment),
-            "protection": copy(source.protection),
-        }
+    first_data_row = _traffic_data_start_row(sheet)
+    template_row = first_data_row
 
-    source_height = sheet.row_dimensions[TRAFFIC_START_ROW].height
-
-    # ---------------------------------------------------------
-    # REMOVE ALL OLD DATA ROWS, INCLUDING ROW 8.
-    # This completely removes old Horizon Ridge/sample values.
-    # ---------------------------------------------------------
-    if sheet.max_row >= TRAFFIC_START_ROW:
-        sheet.delete_rows(
-            TRAFFIC_START_ROW,
-            sheet.max_row - TRAFFIC_START_ROW + 1,
-        )
-
-    # Insert only the exact number of rows needed for this campaign.
-    if records:
-        sheet.insert_rows(TRAFFIC_START_ROW, amount=len(records))
-
-    # ---------------------------------------------------------
-    # Build the new rows.
-    # ---------------------------------------------------------
     for index, record in enumerate(records):
-        output_row = TRAFFIC_START_ROW + index
-
-        # Restore the saved template formatting to the new row.
-        for column in range(1, TRAFFIC_LAST_COLUMN + 1):
-            target = sheet.cell(row=output_row, column=column)
-            snapshot = style_snapshot[column]
-
-            target._style = copy(snapshot["style"])
-            target.number_format = snapshot["number_format"]
-            target.font = copy(snapshot["font"])
-            target.fill = copy(snapshot["fill"])
-            target.border = copy(snapshot["border"])
-            target.alignment = copy(snapshot["alignment"])
-            target.protection = copy(snapshot["protection"])
-
-        sheet.row_dimensions[output_row].height = source_height
+        output_row = first_data_row + index
+        _copy_row_format(sheet, template_row, output_row)
 
         placement_name = _clean(record.get("Placement Name"))
         supplier_name = (
@@ -749,23 +715,30 @@ def populate_traffic_sheet(
             )
 
         values = [
-            None,                                           # A Additional Pixels
-            parsed["site_name"],                            # B Site Name
-            _clean(record.get("Ad server ID")),             # C DCM Placement ID
-            placement_name,                                 # D Placement Name
-            "1x1",                                          # E Dimensions
-            None,                                           # F Video Length
-            None,                                           # G Vast/Vpaid
-            ad_name,                                        # H Ad Name
-            None,                                           # I Trafficking Notes
-            "New",                                          # J Action
-            creative_name,                                  # K Creative File Name
-            "Yes",                                          # L Studio Creative?
-            None,                                           # M Rotation %
-            _clean(record.get("Flight start date")),        # N Start Date
-            _clean(record.get("Flight end date")),          # O End Date
-            final_url,                                      # P Click URL
-            None, None, None, None, None, None, None, None
+            None,
+            parsed["site_name"],
+            _clean(record.get("Ad server ID")),
+            placement_name,
+            "1x1",
+            None,
+            None,
+            ad_name,
+            None,
+            "New",
+            creative_name,
+            "Yes",
+            None,
+            _clean(record.get("Flight start date")),
+            _clean(record.get("Flight end date")),
+            final_url,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ]
 
         for column, value in enumerate(values, start=1):
