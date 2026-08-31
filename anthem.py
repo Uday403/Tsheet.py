@@ -1113,6 +1113,11 @@ def _populate_traffic_sheet(
     override_end_date=None,
 ) -> list[str]:
     sheet = workbook[TRAFFIC_SHEET]
+
+    # Anthem Traffic_Doc campaign header.
+    # B2 must reflect the campaign name read from the Prisma export.
+    sheet["B2"] = campaign_name
+
     _, first_data_row = _find_traffic_layout(
         sheet
     )
@@ -1251,15 +1256,19 @@ def _populate_traffic_sheet(
             column=12,
         ).value = "N"
 
-        sheet.cell(
+        start_cell = sheet.cell(
             row=row,
             column=14,
-        ).value = start_date
+        )
+        start_cell.value = start_date
+        start_cell.number_format = "dd-mm-yyyy"
 
-        sheet.cell(
+        end_cell = sheet.cell(
             row=row,
             column=15,
-        ).value = end_date
+        )
+        end_cell.value = end_date
+        end_cell.number_format = "dd-mm-yyyy"
 
         if len(matches) == 0:
             sheet.cell(
@@ -1549,15 +1558,19 @@ def _populate_multi_sheet(
                 column=rotation_col,
             ).value = "Even"
 
-            sheet.cell(
+            start_cell = sheet.cell(
                 row=output_row,
                 column=start_col,
-            ).value = block["start_date"]
+            )
+            start_cell.value = block["start_date"]
+            start_cell.number_format = "dd-mm-yyyy"
 
-            sheet.cell(
+            end_cell = sheet.cell(
                 row=output_row,
                 column=end_col,
-            ).value = block["end_date"]
+            )
+            end_cell.value = block["end_date"]
+            end_cell.number_format = "dd-mm-yyyy"
 
             sheet.cell(
                 row=output_row,
