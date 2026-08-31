@@ -324,6 +324,14 @@ def detect_channel(record: dict[str, str]) -> str:
         return "CTV"
 
     if (
+        "digital radio" in combined
+        or "digital audio" in combined
+        or "audio" in combined
+        or "drad" in combined
+    ):
+        return "Audio"
+
+    if (
         "video" in combined
         or "instream" in combined
         or "olv" in combined
@@ -678,73 +686,109 @@ def match_anthem_creatives(
     return matches
 
 
+def _infer_url_language(url: str) -> str:
+    """
+    Anthem rule:
+      /es/ in URL -> Spanish
+      otherwise   -> English
+    """
+    return "SP" if "/es/" in url.lower() else "EN"
+
+
+def _infer_url_channel(url: str) -> str:
+    """
+    Anthem CMP rules:
+      DIS  -> Display
+      OLV  -> Video
+      CTV  -> CTV
+      DRAD -> Audio
+    """
+    upper = url.upper()
+
+    if re.search(r"(?:[?&]CMP=|[-_])DIS-", upper):
+        return "Display"
+
+    if "BRC-OLV-" in upper or "CMP=OLV-" in upper:
+        return "Video"
+
+    if "BRC-CTV-" in upper or "CMP=CTV-" in upper:
+        return "CTV"
+
+    if "BRC-DRAD-" in upper or "CMP=DRAD-" in upper:
+        return "Audio"
+
+    return ""
+
+
 def parse_url_mapping(
     url_mapping_text: str = "",
     url_mapping: dict | None = None,
 ) -> dict[tuple[str, str], str]:
     """
-    Accepted dictionary keys:
-      ("EN", "Display")
-      ("SP", "Display")
-      ("EN", "CTV")
-      ("SP", "CTV")
-      ("EN", "Video")
-      ("SP", "Video")
+    The user may simply paste Anthem URLs, one per line.
 
-    Or paste lines such as:
-      EN    Display    https://...
-      SP    Display    https://...
-      EN    CTV        https://...
-      SP    CTV        https://...
-      EN    Video      https://...
-      SP    Video      https://...
+    Mapping is automatic:
+      /es/ -> SP, otherwise EN
+      DIS  -> Display
+      OLV  -> Video
+      CTV  -> CTV
+      DRAD -> Audio
+
+    This parser deliberately extracts URLs from anywhere in the pasted
+    text, so leading bullets, spaces, numbering, or Excel paste artifacts
+    do not prevent mapping.
     """
     result: dict[tuple[str, str], str] = {}
 
+    # Keep backward compatibility with a supplied dict.
     if url_mapping:
         for key, value in url_mapping.items():
-            if isinstance(key, tuple) and len(key) == 2:
-                language = str(key[0]).upper().strip()
-                channel = str(key[1]).strip().title()
+            if not (isinstance(key, tuple) and len(key) == 2):
+                continue
 
-                if channel.upper() == "CTV":
-                    channel = "CTV"
+            language = str(key[0]).upper().strip()
+            channel_raw = str(key[1]).strip().upper()
 
-                result[(language, channel)] = _clean(value)
+            channel_lookup = {
+                "DISPLAY": "Display",
+                "DIS": "Display",
+                "VIDEO": "Video",
+                "OLV": "Video",
+                "CTV": "CTV",
+                "AUDIO": "Audio",
+                "DRAD": "Audio",
+            }
 
-    for line in _clean(url_mapping_text).splitlines():
-        if not line.strip():
-            continue
+            channel = channel_lookup.get(channel_raw, "")
+            cleaned_url = _clean(value)
 
-        parts = line.split("\t")
+            if (
+                language in ("EN", "SP")
+                and channel
+                and cleaned_url
+            ):
+                result[(language, channel)] = cleaned_url
 
-        if len(parts) < 3:
-            # Also allow pipe separator.
-            parts = line.split("|")
+    pasted_text = _clean(url_mapping_text)
 
-        if len(parts) < 3:
-            continue
+    # Extract every HTTP/HTTPS URL, regardless of line formatting.
+    urls = re.findall(
+        r'https?://[^\s<>"\']+',
+        pasted_text,
+        flags=re.IGNORECASE,
+    )
 
-        language = parts[0].strip().upper()
-        channel = parts[1].strip().title()
+    for url in urls:
+        # Remove punctuation that may be copied after a URL.
+        url = url.rstrip(".,);]")
 
-        if channel.upper() == "CTV":
-            channel = "CTV"
+        language = _infer_url_language(url)
+        channel = _infer_url_channel(url)
 
-        url = "\t".join(parts[2:]).strip()
-
-        if "|" in line and len(line.split("\t")) < 3:
-            url = "|".join(parts[2:]).strip()
-
-        if (
-            language in ("EN", "SP")
-            and channel in ("Display", "CTV", "Video")
-            and url
-        ):
+        if channel:
             result[(language, channel)] = url
 
     return result
-
 
 def _resolve_url(
     record: dict[str, str],
@@ -1281,6 +1325,39 @@ def _populate_traffic_sheet(
     return warnings
 
 
+def _find_header_column(
+    sheet,
+    *header_candidates: str,
+) -> int:
+    """
+    Find a column by the actual header text in row 1.
+    This avoids column-shift problems when account templates differ.
+    """
+    normalized_candidates = {
+        _normalize(candidate)
+        for candidate in header_candidates
+    }
+
+    for column in range(1, sheet.max_column + 1):
+        header = _normalize(
+            sheet.cell(
+                row=1,
+                column=column,
+            ).value
+        )
+
+        if not header:
+            continue
+
+        if header in normalized_candidates:
+            return column
+
+    raise ValueError(
+        "Could not find Multi-tab column for: "
+        + " / ".join(header_candidates)
+    )
+
+
 def _populate_multi_sheet(
     workbook,
     records: list[dict[str, str]],
@@ -1294,9 +1371,78 @@ def _populate_multi_sheet(
 
     first_data_row = 2
     max_column = max(
+        sheet.max_column,
         16,
-        min(sheet.max_column, 24),
     )
+
+    # IMPORTANT:
+    # Do not hardcode C/D/E/etc. Use the headers in master_template.xlsm.
+    # Current shared master has:
+    # A = AD Name
+    # B = Trafficking Notes
+    # C = Creative File Name
+    # D = Studio Creative? (Y/N)
+    # E = Rotation %
+    # F = Start Date
+    # G = End Date
+    # H = Click through URL
+    ad_col = _find_header_column(
+        sheet,
+        "AD Name",
+        "Ad Name",
+    )
+
+    notes_col = _find_header_column(
+        sheet,
+        "Trafficking Notes",
+    )
+
+    creative_col = _find_header_column(
+        sheet,
+        "Creative File Name",
+    )
+
+    studio_col = _find_header_column(
+        sheet,
+        "Studio Creative? (Y/N)",
+        "Studio Creative (Y/N)",
+    )
+
+    rotation_col = _find_header_column(
+        sheet,
+        "Rotation %",
+        'Rotation % (or "Even")',
+        "Rotation",
+    )
+
+    start_col = _find_header_column(
+        sheet,
+        "Start Date",
+    )
+
+    end_col = _find_header_column(
+        sheet,
+        "End Date",
+    )
+
+    # Click-through header has extra wording in some versions.
+    url_col = None
+    for column in range(1, sheet.max_column + 1):
+        header = _normalize(
+            sheet.cell(
+                row=1,
+                column=column,
+            ).value
+        )
+
+        if header.startswith("clickthroughurl"):
+            url_col = column
+            break
+
+    if url_col is None:
+        raise ValueError(
+            "Could not find Click through URL column in Multi tab."
+        )
 
     style_snapshot = _snapshot_row_format(
         sheet,
@@ -1304,7 +1450,6 @@ def _populate_multi_sheet(
         max_column,
     )
 
-    # Remove old merged rows below header if template contains any.
     for merged_range in list(
         sheet.merged_cells.ranges
     ):
@@ -1326,8 +1471,7 @@ def _populate_multi_sheet(
     warnings = []
     output_row = first_data_row
 
-    # The same Anthem Ad Name can be used by many placements/tactics.
-    # Multi tab should contain the creative set only once per unique Ad.
+    # One creative block per unique Ad Name.
     ad_blocks: dict[str, dict] = {}
 
     for record in records:
@@ -1345,6 +1489,7 @@ def _populate_multi_sheet(
             creative_names,
         )
 
+        # Multi tab is used only where an Ad has 2+ matching creatives.
         if len(matches) < 2:
             continue
 
@@ -1357,21 +1502,20 @@ def _populate_multi_sheet(
             override_end_date,
         )
 
+        final_url = _resolve_url(
+            record,
+            url_map,
+        )
+
         ad_blocks[ad_name] = {
-            "record": record,
             "matches": matches,
             "start_date": start_date,
             "end_date": end_date,
-            "url": _resolve_url(
-                record,
-                url_map,
-            ),
+            "url": final_url,
         }
 
     for ad_name, block in ad_blocks.items():
-        for creative_name in block[
-            "matches"
-        ]:
+        for creative_name in block["matches"]:
             _apply_row_format(
                 sheet,
                 output_row,
@@ -1380,43 +1524,44 @@ def _populate_multi_sheet(
 
             sheet.cell(
                 row=output_row,
-                column=1,
+                column=ad_col,
             ).value = ad_name
 
             sheet.cell(
                 row=output_row,
-                column=2,
-            ).value = "New"
+                column=notes_col,
+            ).value = ""
 
+            # This now writes under the ACTUAL "Creative File Name" header.
+            # In the current master_template.xlsm this is column C.
             sheet.cell(
                 row=output_row,
-                column=4,
+                column=creative_col,
             ).value = creative_name
 
             sheet.cell(
                 row=output_row,
-                column=5,
+                column=studio_col,
             ).value = "N"
 
-            # Supplied Anthem sheet uses text "Even", not 50%.
             sheet.cell(
                 row=output_row,
-                column=6,
+                column=rotation_col,
             ).value = "Even"
 
             sheet.cell(
                 row=output_row,
-                column=7,
+                column=start_col,
             ).value = block["start_date"]
 
             sheet.cell(
                 row=output_row,
-                column=8,
+                column=end_col,
             ).value = block["end_date"]
 
             sheet.cell(
                 row=output_row,
-                column=9,
+                column=url_col,
             ).value = block["url"]
 
             output_row += 1
@@ -1427,7 +1572,6 @@ def _populate_multi_sheet(
             )
 
     return warnings
-
 
 def _populate_additional_pixels(
     workbook,
