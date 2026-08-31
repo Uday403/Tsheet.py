@@ -631,6 +631,7 @@ def match_anthem_creatives(
     if not language or not channel:
         return []
 
+    # DISPLAY
     if channel == "Display":
         required_dimension = placement_dimension(record)
 
@@ -646,7 +647,6 @@ def match_anthem_creatives(
             if _extract_dimension(name).lower() != required_dimension.lower():
                 continue
 
-            # Display package filenames are .zip in supplied Anthem files.
             if not name.lower().endswith(
                 (".zip", ".jpg", ".jpeg", ".png", ".gif", ".webp")
             ):
@@ -663,29 +663,60 @@ def match_anthem_creatives(
     if not required_duration:
         return []
 
-    matches = []
+    # AUDIO
+    # Never allow OLV/CTV MP4 creatives to be adopted by Audio placements.
+    # Audio placements may only match actual audio-file formats.
+    if channel == "Audio":
+        audio_extensions = (
+            ".mp3",
+            ".wav",
+            ".m4a",
+            ".aac",
+            ".ogg",
+        )
 
-    for name in creative_names:
-        if not name.lower().endswith(".mp4"):
-            continue
+        matches = []
 
-        if creative_language(name) != language:
-            continue
+        for name in creative_names:
+            if not name.lower().endswith(audio_extensions):
+                continue
 
-        if creative_duration(name) != required_duration:
-            continue
+            if creative_language(name) != language:
+                continue
 
-        # The supplied Anthem Traffic Doc uses the 16x9 versions for
-        # both CTV and OLV/Video. 9x16 files are therefore excluded.
-        aspect = creative_aspect_ratio(name)
+            if creative_duration(name) != required_duration:
+                continue
 
-        if aspect and aspect != "16x9":
-            continue
+            matches.append(name)
 
-        matches.append(name)
+        return matches
 
-    return matches
+    # VIDEO / CTV
+    # Only actual video files are eligible.
+    if channel in ("Video", "CTV"):
+        matches = []
 
+        for name in creative_names:
+            if not name.lower().endswith(".mp4"):
+                continue
+
+            if creative_language(name) != language:
+                continue
+
+            if creative_duration(name) != required_duration:
+                continue
+
+            # Existing Anthem OLV/CTV trafficking uses 16x9 assets.
+            aspect = creative_aspect_ratio(name)
+
+            if aspect and aspect != "16x9":
+                continue
+
+            matches.append(name)
+
+        return matches
+
+    return []
 
 def _infer_url_language(url: str) -> str:
     """
@@ -1716,6 +1747,14 @@ def generate_anthem_tsheet(
         url_mapping_text=url_mapping_text,
         url_mapping=url_mapping,
     )
+
+    # Do not silently generate a sheet when pasted Anthem URLs were not
+    # understood. This catches deployment/input issues immediately.
+    if url_mapping_text and not url_map:
+        raise ValueError(
+            "Anthem URLs were pasted, but none could be mapped. "
+            "Expected CMP markers DIS, CTV, OLV or DRAD."
+        )
 
     workbook = load_workbook(
         MASTER_TEMPLATE,
