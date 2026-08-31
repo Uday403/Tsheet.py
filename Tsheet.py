@@ -8,6 +8,10 @@ from aaa import (
     preview_aaa_setup,
     validate_multi_rotation,
 )
+from anthem import (
+    generate_anthem_tsheet,
+    preview_anthem_setup,
+)
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 from simon_vip import (
@@ -489,6 +493,208 @@ elif selected_account == "AAA":
             except Exception as exc:
                 st.exception(exc)
 
+
+
+
+elif selected_account == "Anthem / Elevance":
+    st.success("Anthem / Elevance automation is ready.")
+
+    st.info(
+        "Upload the Prisma CSV and Anthem creative files/ZIPs. "
+        "One creative goes directly to Traffic_Doc; two or more matching "
+        "creatives go to the Multi-Ad or Creative Rotation tab."
+    )
+
+    prisma_file, creative_files = common_upload_fields(
+        "anthem",
+        allow_zip=True,
+    )
+
+    url_mapping_text = st.text_area(
+        "Paste Anthem URL Mapping",
+        placeholder=(
+            "EN\tDisplay\thttps://...\n"
+            "SP\tDisplay\thttps://...\n"
+            "EN\tCTV\thttps://...\n"
+            "SP\tCTV\thttps://...\n"
+            "EN\tVideo\thttps://...\n"
+            "SP\tVideo\thttps://..."
+        ),
+        height=220,
+        key="anthem_url_mapping",
+    )
+
+    override_dates = st.checkbox(
+        "Override Prisma flight dates",
+        value=False,
+        key="anthem_override_dates",
+    )
+
+    override_start_date = None
+    override_end_date = None
+
+    if override_dates:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            override_start_date = st.date_input(
+                "Start Date",
+                key="anthem_start_date",
+            )
+
+        with col2:
+            override_end_date = st.date_input(
+                "End Date",
+                key="anthem_end_date",
+            )
+
+    preview = None
+
+    if prisma_file is not None and creative_files:
+        try:
+            preview = preview_anthem_setup(
+                prisma_file=prisma_file,
+                creative_files=creative_files,
+                url_mapping_text=url_mapping_text,
+            )
+
+            placements = preview["placements"]
+
+            direct_count = sum(
+                1 for row in placements
+                if row["creative_destination"] == "Traffic_Doc"
+            )
+
+            multi_count = sum(
+                1 for row in placements
+                if row["creative_destination"] == "Multi"
+            )
+
+            unmatched_count = sum(
+                1 for row in placements
+                if row["creative_destination"] == "Unmatched"
+            )
+
+            metric1, metric2, metric3 = st.columns(3)
+
+            with metric1:
+                st.metric("Direct to Traffic_Doc", direct_count)
+
+            with metric2:
+                st.metric("Multi Creative Ads", multi_count)
+
+            with metric3:
+                st.metric("Unmatched Placements", unmatched_count)
+
+            with st.expander(
+                "Anthem Creative Matching Preview",
+                expanded=True,
+            ):
+                for row in placements:
+                    st.write(
+                        f"**{row['ad_name'] or 'Ad Name not detected'}**"
+                    )
+                    st.caption(
+                        f"Placement: {row['placement_name']}"
+                    )
+                    st.caption(
+                        f"Language / Channel: "
+                        f"{row['language'] or 'Not detected'} / "
+                        f"{row['channel'] or 'Not detected'}"
+                    )
+                    st.caption(
+                        f"Destination: {row['creative_destination']}"
+                    )
+
+                    if row["matches"]:
+                        for creative in row["matches"]:
+                            st.caption(f"↳ {creative}")
+                    else:
+                        st.warning(
+                            "No creative matched this placement."
+                        )
+
+                    if not row["url"]:
+                        st.warning(
+                            "No URL mapping found for this placement."
+                        )
+
+                    st.divider()
+
+            if preview["warnings"]:
+                with st.expander("Anthem Preview Warnings"):
+                    for warning in preview["warnings"]:
+                        st.warning(warning)
+
+        except Exception as exc:
+            st.error(
+                f"Unable to preview Anthem matching: {exc}"
+            )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Anthem_Tsheet.xlsm",
+        key="anthem_output",
+    )
+
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Anthem T-Sheet",
+        type="primary",
+        use_container_width=True,
+        key="generate_anthem_tsheet",
+    ):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        elif not creative_files:
+            st.error(
+                "Please upload Anthem creative files or ZIPs."
+            )
+        elif not url_mapping_text.strip():
+            st.error(
+                "Please paste the Anthem URL mapping."
+            )
+        else:
+            try:
+                with st.spinner(
+                    "Generating the Anthem T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_anthem_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            url_mapping_text=url_mapping_text,
+                            override_start_date=override_start_date,
+                            override_end_date=override_end_date,
+                        )
+                    )
+
+                st.success(
+                    "Anthem T-Sheet generated successfully."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "Review Anthem warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download Anthem T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
 
 
 elif selected_account == "Simon VIP":
