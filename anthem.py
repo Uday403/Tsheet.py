@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -805,20 +806,55 @@ def _resolve_url(
 
 
 def _to_excel_date_or_text(value):
+    """
+    Normalize every supported date source to a real Python datetime.
+
+    Handles:
+    - existing datetime/date values
+    - Excel serial dates such as 46273 / 46387
+    - numeric serials stored as text
+    - mm/dd/yyyy
+    - mm-dd-yyyy
+    - dd-mm-yyyy
+    - dd/mm/yyyy
+    - yyyy-mm-dd
+    - yyyy/mm/dd
+    - yyyy-mm-dd HH:MM:SS
+    """
     if value is None:
         return ""
 
+    # Already a real date/datetime.
     if isinstance(value, datetime):
         return value
+
+    # Excel serial supplied as int/float.
+    if isinstance(value, (int, float)):
+        try:
+            return from_excel(value)
+        except Exception:
+            return value
 
     value = _clean(value)
 
     if not value:
         return ""
 
+    # Excel serial supplied as text, e.g. "46273" or "46273.0".
+    if re.fullmatch(r"\d+(?:\.0+)?", value):
+        try:
+            serial = float(value)
+            # Normal modern Excel dates are safely in this range.
+            if 1 <= serial <= 100000:
+                return from_excel(serial)
+        except Exception:
+            pass
+
     for fmt in (
         "%m/%d/%Y",
         "%m-%d-%Y",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
         "%Y-%m-%d",
         "%Y/%m/%d",
         "%Y-%m-%d %H:%M:%S",
@@ -829,7 +865,6 @@ def _to_excel_date_or_text(value):
             pass
 
     return value
-
 
 def _resolve_dates(
     record: dict[str, str],
