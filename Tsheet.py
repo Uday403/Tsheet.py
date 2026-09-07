@@ -2,10 +2,8 @@ import csv
 import itertools
 import os
 from datetime import datetime
-from io import BytesIO
 
 import streamlit as st
-from openpyxl import load_workbook
 
 from aaa import (
     creative_version_key,
@@ -74,76 +72,6 @@ TRACKING_FIELDS = [
     "warning_count",
     "estimated_minutes_saved",
 ]
-
-
-def count_generated_ads(output_bytes):
-    """
-    Count generated Ads in Traffic_Doc.
-
-    The function searches the first 20 rows for an AD Name header
-    and then counts all non-empty values underneath it.
-
-    Returns 0 if Traffic_Doc or the AD Name header cannot be found.
-    """
-    try:
-        workbook = load_workbook(
-            BytesIO(output_bytes),
-            read_only=True,
-            data_only=False,
-            keep_vba=True,
-        )
-
-        if "Traffic_Doc" not in workbook.sheetnames:
-            workbook.close()
-            return 0
-
-        sheet = workbook["Traffic_Doc"]
-
-        ad_name_column = None
-        header_row = None
-
-        for row in sheet.iter_rows(
-            min_row=1,
-            max_row=min(sheet.max_row, 20),
-        ):
-            for cell in row:
-                value = str(cell.value or "").strip().lower()
-
-                if value in {
-                    "ad name",
-                    "ad_name",
-                    "adname",
-                }:
-                    ad_name_column = cell.column
-                    header_row = cell.row
-                    break
-
-            if ad_name_column is not None:
-                break
-
-        if ad_name_column is None:
-            workbook.close()
-            return 0
-
-        count = 0
-
-        for row_number in range(
-            header_row + 1,
-            sheet.max_row + 1,
-        ):
-            value = sheet.cell(
-                row=row_number,
-                column=ad_name_column,
-            ).value
-
-            if value is not None and str(value).strip():
-                count += 1
-
-        workbook.close()
-        return count
-
-    except Exception:
-        return 0
 
 
 def log_dashboard_usage(
@@ -486,11 +414,7 @@ if selected_account == "Pulte":
                         )
                     )
 
-                ads_processed = (
-                    count_generated_ads(
-                        output_bytes
-                    )
-                )
+                ads_processed = 0
 
                 log_dashboard_usage(
                     account="Pulte",
@@ -619,11 +543,7 @@ elif selected_account == "Pulte VIP":
                         )
                     )
 
-                ads_processed = (
-                    count_generated_ads(
-                        output_bytes
-                    )
-                )
+                ads_processed = 0
 
                 log_dashboard_usage(
                     account="Pulte VIP",
@@ -993,9 +913,9 @@ elif selected_account == "AAA":
                     )
 
                 ads_processed = (
-                    count_generated_ads(
-                        output_bytes
-                    )
+                    len(preview.get("placements", []))
+                    if preview is not None
+                    else 0
                 )
 
                 log_dashboard_usage(
@@ -1306,23 +1226,19 @@ elif selected_account == "Anthem / Elevance":
                         )
                     )
 
-                ads_processed = (
-                    count_generated_ads(
-                        output_bytes
-                    )
+                placements = (
+                    preview.get("placements", [])
+                    if preview is not None
+                    else []
                 )
+
+                ads_processed = len(placements)
 
                 direct_count = 0
                 multi_count = 0
                 unmatched_count = 0
 
                 if preview is not None:
-                    placements = (
-                        preview.get(
-                            "placements",
-                            [],
-                        )
-                    )
 
                     direct_count = sum(
                         1
@@ -1645,9 +1561,9 @@ elif selected_account == "Simon VIP":
                     )
 
                 ads_processed = (
-                    count_generated_ads(
-                        output_bytes
-                    )
+                    len(preview.get("rows", []))
+                    if preview is not None
+                    else 0
                 )
 
                 unmatched_count = 0
