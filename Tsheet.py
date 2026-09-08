@@ -2012,9 +2012,9 @@ elif selected_account == "Brooks":
             try:
                 with st.spinner("Generating Brooks T-Sheet..."):
                     output_bytes, warnings, preview = generate_brooks_tsheet(
-                        prisma_file=prisma_file,
-                        creative_files=creative_files or [],
-                        url_mapping_text=brooks_urls_text,
+                        prisma_file,
+                        creative_files or [],
+                        brooks_urls_text,
                         apply_dynata_display=apply_dynata,
                     )
 
