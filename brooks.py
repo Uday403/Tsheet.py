@@ -249,7 +249,15 @@ def _clear_values(ws, start_row: int, end_row: int):
             ws.cell(r, c).value = None
 
 
-def preview_brooks_setup(prisma_file, creative_files, url_mapping_text: str = ""):
+def preview_brooks_setup(
+    prisma_file,
+    creative_files,
+    url_mapping_text: str = "",
+    complete_urls_text: str | None = None,
+):
+    # Backward-compatible alias for older dashboard versions.
+    if complete_urls_text and not url_mapping_text:
+        url_mapping_text = complete_urls_text
     rows = _read_csv_rows(prisma_file)
     campaign = _campaign_name(rows)
     concept = _extract_concept(campaign)
@@ -318,8 +326,13 @@ def generate_brooks_tsheet(
     url_mapping_text: str = "",
     apply_dynata_display: bool = False,
     template_path: str | Path | None = None,
+    complete_urls_text: str | None = None,
 ):
     """Generate Brooks T-sheet while preserving the master template layout/styles."""
+    # Backward-compatible alias for older dashboard versions.
+    if complete_urls_text and not url_mapping_text:
+        url_mapping_text = complete_urls_text
+
     preview = preview_brooks_setup(prisma_file, creative_files, url_mapping_text)
     rows = _read_csv_rows(prisma_file)
     urls = _extract_urls(url_mapping_text)
