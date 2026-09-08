@@ -15,6 +15,10 @@ from anthem import (
     generate_anthem_tsheet,
     preview_anthem_setup,
 )
+from brooks import (
+    generate_brooks_tsheet,
+    preview_brooks_setup,
+)
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 from simon_vip import (
@@ -30,6 +34,7 @@ ACCOUNT_NAMES = [
     "AAA",
     "Simon VIP",
     "Anthem / Elevance",
+    "Brooks",
     "UPS Store",
     "Hyatt",
     "USTA",
@@ -1920,6 +1925,122 @@ elif selected_account == (
 # ============================================================
 # ACCOUNTS NOT YET AUTOMATED
 # ============================================================
+
+
+# ============================================================
+# BROOKS
+# ============================================================
+elif selected_account == "Brooks":
+    st.success("Brooks automation is ready.")
+    st.info(
+        "Automates Prisma mapping, Ad Names, creative matching, 1x1 tracking, "
+        "Multi-Ad rotation and dates. Click-through URLs / UTMs are intentionally "
+        "left for manual population."
+    )
+
+    prisma_file, creative_files = common_upload_fields("brooks", allow_zip=True)
+
+    apply_dynata = st.checkbox(
+        "Apply 2026 Dynata pixel note to Display placements",
+        value=False,
+        help="Enable only when the trafficking request requires the Dynata pixel.",
+        key="brooks_dynata",
+    )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Brooks_Tsheet.xlsm",
+        key="brooks_output",
+    )
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button("Preview Brooks Matching", use_container_width=True):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        else:
+            try:
+                preview = preview_brooks_setup(prisma_file, creative_files or [])
+                st.session_state["brooks_preview"] = preview
+            except Exception as exc:
+                st.exception(exc)
+
+    preview = st.session_state.get("brooks_preview")
+    if preview:
+        st.write(f"**Campaign:** {preview['campaign']}")
+        st.write(f"**Concept extracted:** {preview['concept']}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Placements", len(preview["placements"]))
+        c2.metric("Direct", preview["direct_count"])
+        c3.metric("Multi", preview["multi_count"])
+        c4.metric("1x1", preview["tracking_1x1_count"])
+
+        preview_rows = [
+            {
+                "Placement ID": p["placement_id"],
+                "Dimension": p["size"],
+                "Ad Name": p["ad_name"],
+                "Status": p["status"],
+                "Matched Creatives": ", ".join(p["matches"]),
+            }
+            for p in preview["placements"]
+        ]
+        st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+        if preview["warnings"]:
+            with st.expander("Preview warnings"):
+                for warning in preview["warnings"]:
+                    st.warning(warning)
+
+    if st.button(
+        "Generate Brooks T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        else:
+            try:
+                with st.spinner("Generating Brooks T-Sheet..."):
+                    output_bytes, warnings, preview = generate_brooks_tsheet(
+                        prisma_file=prisma_file,
+                        creative_files=creative_files or [],
+                        apply_dynata_display=apply_dynata,
+                    )
+
+                log_dashboard_usage(
+                    account="Brooks",
+                    action="T-Sheet Generated",
+                    output_file=output_name,
+                    ads_processed=len(preview["placements"]),
+                    direct_count=preview["direct_count"],
+                    multi_count=preview["multi_count"],
+                    unmatched_count=preview["unmatched_count"],
+                    creative_count=preview["creative_count"],
+                    warning_count=len(warnings),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success("Brooks T-Sheet generated successfully.")
+                st.caption(
+                    f"{len(preview['placements'])} placements processed | "
+                    f"{preview['tracking_1x1_count']} Tracking_1x1 | "
+                    f"{preview['multi_count']} Multi-Ad placements"
+                )
+
+                if warnings:
+                    with st.expander("Review Brooks warnings"):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download Brooks T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.exception(exc)
 
 else:
     st.info(
