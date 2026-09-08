@@ -1934,11 +1934,21 @@ elif selected_account == "Brooks":
     st.success("Brooks automation is ready.")
     st.info(
         "Automates Prisma mapping, Ad Names, creative matching, 1x1 tracking, "
-        "Multi-Ad rotation and dates. Click-through URLs / UTMs are intentionally "
-        "left for manual population."
+        "Multi-Ad rotation and dates. Paste all complete URLs/UTMs in one box; "
+        "the dashboard maps them to the matching Brooks creative concept."
     )
 
     prisma_file, creative_files = common_upload_fields("brooks", allow_zip=True)
+
+    brooks_urls_text = st.text_area(
+        "Paste Complete URLs / UTMs",
+        placeholder=(
+            "Paste all complete Brooks URLs/UTMs here, one per line.\n"
+            "Example: https://www.brooksrunning.com/en_us/.../?tid=..."
+        ),
+        height=180,
+        key="brooks_urls",
+    )
 
     apply_dynata = st.checkbox(
         "Apply 2026 Dynata pixel note to Display placements",
@@ -1960,7 +1970,7 @@ elif selected_account == "Brooks":
             st.error("Please upload the Prisma CSV.")
         else:
             try:
-                preview = preview_brooks_setup(prisma_file, creative_files or [])
+                preview = preview_brooks_setup(prisma_file, creative_files or [], brooks_urls_text)
                 st.session_state["brooks_preview"] = preview
             except Exception as exc:
                 st.exception(exc)
@@ -2004,6 +2014,7 @@ elif selected_account == "Brooks":
                     output_bytes, warnings, preview = generate_brooks_tsheet(
                         prisma_file=prisma_file,
                         creative_files=creative_files or [],
+                        url_mapping_text=brooks_urls_text,
                         apply_dynata_display=apply_dynata,
                     )
 
