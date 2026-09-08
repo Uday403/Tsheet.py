@@ -378,7 +378,6 @@ def generate_brooks_tsheet(
     }
     mc = {
         "ad": _find_col(multi_ws, multi_header, ["ad name"]),
-        "action": _find_col(multi_ws, multi_header, ["action"]),
         "notes": _find_col(multi_ws, multi_header, ["trafficking notes"]),
         "creative": _find_col(multi_ws, multi_header, ["creative file name"]),
         "studio": _find_col(multi_ws, multi_header, ["studio creative"]),
@@ -453,7 +452,7 @@ def generate_brooks_tsheet(
             for creative in matches:
                 apply_style(multi_ws, multi_row, multi_style, multi_height)
                 vals = {
-                    "ad": p["ad_name"], "action": "New", "notes": None,
+                    "ad": p["ad_name"], "notes": None,
                     "creative": creative, "studio": "N", "rotation": "Even",
                     "start": p["start_date"], "end": p["end_date"],
                 }
