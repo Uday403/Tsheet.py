@@ -18,6 +18,31 @@ PRISMA_SHEET = "Prisma Export - Paste as values"
 TRAFFIC_SHEET = "Traffic_Doc"
 ROTATION_SHEET = "Multi-Ad or Creative Rotation"
 
+
+BRAND_ALIASES = {
+    # Put the more specific sub-brands first. Creative files can still
+    # begin with a generic PLT/Pulte account prefix.
+    "Centex": {"centex", "ctx"},
+    "Del Webb": {"delwebb", "dwb"},
+    "DiVosta": {"divosta"},
+    "John Wieland": {"johnwieland"},
+    "Wieland": {"wieland"},
+    "Pulte": {"pulte", "pult", "plt"},
+}
+
+
+def _detect_brand_from_text(text: str) -> str:
+    normalized = _normalize(text)
+    if not normalized:
+        return ""
+
+    for brand, aliases in BRAND_ALIASES.items():
+        for alias in aliases:
+            if _normalize(alias) in normalized:
+                return brand
+
+    return ""
+
 TRAFFIC_HEADER_ROW = 6
 TRAFFIC_FIRST_DATA_ROW = 7
 TRAFFIC_LAST_COLUMN = 23  # Column W
@@ -281,12 +306,31 @@ def _creative_score(
     normalized_creative = _normalize(creative_name)
     score = 0
 
+    placement_dimension = parsed["dimension"]
+    creative_dimension = _find_dimension(creative_name)
+
+    # Dimension is a hard requirement whenever the placement has one.
+    if placement_dimension:
+        if not creative_dimension:
+            return -10000
+        if _normalize(placement_dimension) != _normalize(creative_dimension):
+            return -10000
+        score += 100
+
+    placement_brand = parsed["brand"]
+    creative_brand = _detect_brand_from_text(creative_name)
+
+    # If the creative clearly declares a brand/set (CTX, DWB, etc.),
+    # it must match the brand in the placement name.
+    if creative_brand:
+        if placement_brand and creative_brand != placement_brand:
+            return -10000
+        score += 80
+
     weighted_values = (
         (parsed["community_id"], 30),
         (parsed["community"], 22),
-        (parsed["dimension"], 20),
-        (parsed["division"], 6),
-        (parsed["brand"], 4),
+        (parsed["division"], 8),
     )
 
     for value, weight in weighted_values:
@@ -308,16 +352,39 @@ def match_creative(
     if not creative_names:
         return ""
 
+    parsed = _parse_pulte_placement(placement_name)
+    placement_dimension = parsed["dimension"]
+    placement_brand = parsed["brand"]
+
+    candidates = list(creative_names)
+
+    # 1) Hard-filter by exact dimension first.
+    if placement_dimension:
+        dim_candidates = [
+            name
+            for name in candidates
+            if _normalize(_find_dimension(name)) == _normalize(placement_dimension)
+        ]
+        if dim_candidates:
+            candidates = dim_candidates
+
+    # 2) Then map the correct creative SET by placement brand.
+    #    Example: Centex placement -> CTX creative, Del Webb -> DWB creative.
+    brand_candidates = [
+        name
+        for name in candidates
+        if _detect_brand_from_text(name) == placement_brand
+    ]
+    if brand_candidates:
+        candidates = brand_candidates
+
     ranked = sorted(
-        (
-            (_creative_score(name, placement_name), name)
-            for name in creative_names
-        ),
+        ((_creative_score(name, placement_name), name) for name in candidates),
         key=lambda item: (item[0], item[1]),
         reverse=True,
     )
 
-    return ranked[0][1] if ranked[0][0] > 0 else ""
+    return ranked[0][1] if ranked and ranked[0][0] > 0 else ""
 
 
 def _parse_complete_urls(text: str) -> list[str]:
@@ -355,10 +422,11 @@ def match_complete_url(
     parsed = _parse_pulte_placement(placement_name)
 
     community_id = parsed["community_id"]
+    placement_brand = parsed["brand"]
     normalized_placement = _normalize(placement_name)
     normalized_ad_name = _normalize(ad_name)
 
-    # First: mapped line containing placement/ad/community ID.
+    # 1) Most specific: mapped line containing placement/ad/community ID.
     for line in url_lines:
         url = _extract_url(line)
         if not url:
@@ -373,7 +441,23 @@ def match_complete_url(
         if normalized_placement and normalized_placement in normalized_line:
             return url
 
-    # Second: community words embedded in URL.
+    # 2) Brand/set mapping from the placement name.
+    #    Supports labels OR URL text itself, e.g.:
+    #      Centex<TAB>https://...
+    #      Del Webb<TAB>https://...
+    #    and URLs containing centex/ctx or delwebb/dwb.
+    brand_matches = []
+    for line in url_lines:
+        url = _extract_url(line)
+        if not url:
+            continue
+        if _detect_brand_from_text(line) == placement_brand:
+            brand_matches.append(url)
+
+    if len(brand_matches) == 1:
+        return brand_matches[0]
+
+    # 3) Community words embedded in the URL.
     community_words = [
         word.lower()
         for word in re.split(r"\W+", parsed["community"])
@@ -385,24 +469,24 @@ def match_complete_url(
         lowered_url = url.lower()
 
         if url and community_words and all(
-            word in lowered_url
-            for word in community_words
+            word in lowered_url for word in community_words
         ):
             return url
 
-    # Third: same number of URLs and placements = map by order.
     extracted_urls = [
         _extract_url(line)
         for line in url_lines
         if _extract_url(line)
     ]
 
-    if len(extracted_urls) == total_placements:
-        return extracted_urls[placement_index]
-
-    # Fourth: only one URL supplied = apply to all.
+    # 4) If there is exactly one URL, apply it to all placements.
     if len(extracted_urls) == 1:
         return extracted_urls[0]
+
+    # 5) Order mapping is allowed only when there is genuinely one URL
+    #    per placement. We do NOT guess between 2 brand URLs and 12 placements.
+    if len(extracted_urls) == total_placements:
+        return extracted_urls[placement_index]
 
     return ""
 
