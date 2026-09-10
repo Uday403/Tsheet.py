@@ -509,52 +509,102 @@ def _site_name(source: str, supplier_name: str) -> str:
 def _division_from_placement(
     placement_name: str,
     tracking: dict,
-) -> str:
+) -> tuple[str, str]:
     """
-    Uses the official Division list. Longest match wins.
+    Returns:
+        (tracking_division, business_division)
 
-    Examples automatically supported from the workbook:
-      Tennessee -> Tennessee
-      Southwest Florida -> Southwest Florida
-      Northeast Corridor -> Northeast Corridor
-      Central Texas -> Central Texas (if present in current workbook)
-      etc.
+    Some Pulte business divisions map to a different official CMP Division.
+
+    Official hierarchy examples:
+        Tennessee -> Nashville -> NAS-_-
+        St. Louis -> Illinois-St. Louis -> ILS-_-
+        Southern Nevada -> Las Vegas -> LSV-_-
+        Indianapolis-Kentucky -> Indianapolis-Louisville -> INK-_-
+        Mid Atlantic -> Mid-Atlantic -> MAT-_-
+        Central Texas -> Austin -> AUS-_-
     """
-    detected = _match_tracking_category(placement_name, tracking, "Division")
-    if detected:
-        return detected
+    normalized = _normalize(placement_name)
 
-    # Common taxonomy spelling aliases.
-    aliases = {
-        "tennessee": "Tennessee",
-        "indianapoliskentucky": "Indianapolis-Louisville",
-        "indianapolislouisville": "Indianapolis-Louisville",
-        "midatlantic": "Mid-Atlantic",
-        "northeastcorridor": "Northeast Corridor",
-        "southwestflorida": "Southwest Florida",
-        "southeastflorida": "Southeast Florida",
-        "southerncalifornia": "Southern California",
-        "northerncalifornia": "Northern California",
-        "pacificnorthwest": "Pacific Northwest",
-        "westflorida": "West Florida",
-        "northflorida": "North Florida",
-        "northeastflorida": "Northeast Florida",
-        "eastcarolina": "East Carolina",
-        "coastalcarolinas": "Coastal Carolinas",
-        "newengland": "New England",
-        "newmexico": "New Mexico",
-        "sanantonio": "San Antonio",
+    hierarchy_aliases = {
+        "indianapoliskentucky": ("Indianapolis-Louisville", "Indianapolis-Kentucky"),
+        "indianapolislouisville": ("Indianapolis-Louisville", "Indianapolis-Kentucky"),
+        "illinoisstlouis": ("Illinois-St. Louis", "St. Louis"),
+        "centraltexas": ("Austin", "Central Texas"),
+        "southernnevada": ("Las Vegas", "Southern Nevada"),
+        "tennessee": ("Nashville", "Tennessee"),
+        "stlouis": ("Illinois-St. Louis", "St. Louis"),
+        "midatlantic": ("Mid-Atlantic", "Mid Atlantic"),
+        "southwestflorida": ("Southwest Florida", "Southwest Florida"),
+        "southeastflorida": ("Southeast Florida", "Southeast Florida"),
+        "southerncalifornia": ("Southern California", "Southern California"),
+        "northerncalifornia": ("Northern California", "Northern California"),
+        "pacificnorthwest": ("Pacific Northwest", "Pacific Northwest"),
+        "northeastcorridor": ("Northeast Corridor", "Northeast Corridor"),
+        "northeastflorida": ("Northeast Florida", "Northeast Florida"),
+        "coastalcarolinas": ("Coastal Carolinas", "Coastal Carolinas"),
+        "eastcarolina": ("East Carolina", "East Carolina"),
+        "westflorida": ("West Florida", "West Florida"),
+        "northflorida": ("North Florida", "North Florida"),
+        "newengland": ("New England", "New England"),
+        "newmexico": ("New Mexico", "New Mexico"),
+        "sanantonio": ("San Antonio", "San Antonio"),
+        "arizona": ("Arizona", "Arizona"),
+        "charlotte": ("Charlotte", "Charlotte"),
+        "cleveland": ("Cleveland", "Cleveland"),
+        "columbus": ("Columbus", "Columbus"),
+        "dallas": ("Dallas", "Dallas"),
+        "georgia": ("Georgia", "Georgia"),
+        "houston": ("Houston", "Houston"),
+        "michigan": ("Michigan", "Michigan"),
+        "minnesota": ("Minnesota", "Minnesota"),
+        "raleigh": ("Raleigh", "Raleigh"),
+        "utah": ("Utah", "Utah"),
+        "national": ("National", "National"),
     }
 
-    normalized = _normalize(placement_name)
-    matches = [
-        (len(alias), official)
-        for alias, official in aliases.items()
-        if alias in normalized and _lookup_code(tracking, "Division", official)
-    ]
+    for alias, (tracking_division, business_division) in sorted(
+        hierarchy_aliases.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if alias in normalized and _lookup_code(
+            tracking,
+            "Division",
+            tracking_division,
+        ):
+            return tracking_division, business_division
 
-    return max(matches)[1] if matches else ""
+    detected = _match_tracking_category(placement_name, tracking, "Division")
+    if detected:
+        return detected, detected
 
+    return "", ""
+
+
+def _sem_division_candidates(
+    tracking_division: str,
+    business_division: str,
+) -> set[str]:
+    candidates = {
+        _normalize(tracking_division),
+        _normalize(business_division),
+    }
+
+    reverse_hierarchy = {
+        "nashville": "Tennessee",
+        "illinoisstlouis": "St. Louis",
+        "lasvegas": "Southern Nevada",
+        "indianapolislouisville": "Indianapolis-Kentucky",
+        "midatlantic": "Mid Atlantic",
+        "austin": "Central Texas",
+    }
+
+    mapped = reverse_hierarchy.get(_normalize(tracking_division))
+    if mapped:
+        candidates.add(_normalize(mapped))
+
+    return {value for value in candidates if value}
 
 def _region_alias_matches(text: str, region_row: dict[str, str]) -> bool:
     """
@@ -592,7 +642,8 @@ def _region_alias_matches(text: str, region_row: dict[str, str]) -> bool:
 
 def _region_from_placement(
     placement_name: str,
-    division: str,
+    tracking_division: str,
+    business_division: str,
     tracking: dict,
 ) -> tuple[str, str]:
     """
@@ -608,9 +659,14 @@ def _region_from_placement(
     """
     rows = tracking["region_rows"]
 
+    sem_divisions = _sem_division_candidates(
+        tracking_division,
+        business_division,
+    )
+
     division_rows = [
         row for row in rows
-        if _normalize(row["division"]) == _normalize(division)
+        if _normalize(row["division"]) in sem_divisions
     ]
 
     # Match placement against the division's permitted regions.
@@ -654,26 +710,28 @@ def _region_from_placement(
     # Explicit business-safe defaults where the workbook/business taxonomy
     # has a known umbrella market.
     explicit_defaults = {
-        "Tennessee": "nashville",
+        "Nashville": "nashville",
         "Raleigh": "raleigh",
         "San Antonio": "san antonio",
         "West Florida": "tampa",
         "North Florida": "jacksonville",
-        "Northeast Florida": "northeast florida",
         "Southwest Florida": "fort myers-naples",
         "Charlotte": "charlotte",
+        "Illinois-St. Louis": "st.louis",
+        "Las Vegas": "las-vegas",
     }
 
-    preferred = explicit_defaults.get(division)
+    preferred = explicit_defaults.get(tracking_division)
     if preferred and _lookup_code(tracking, "Region", preferred):
         return preferred, ""
 
-    if not division:
+    if not tracking_division:
         return "", "Division could not be detected, so Region could not be resolved."
 
     return (
         "",
-        f"Region could not be resolved safely for division '{division}'. "
+        f"Region could not be resolved safely for division "
+        f"'{business_division or tracking_division}'. "
         "This division has multiple possible DMA/region values and the "
         "placement name did not contain a recognizable region token.",
     )
@@ -816,7 +874,10 @@ def parse_pulte_placement(
     brand = _brand_from_placement(placement_name)
     community_id = _community_id(placement_name)
 
-    division = _division_from_placement(placement_name, tracking)
+    division, business_division = _division_from_placement(
+        placement_name,
+        tracking,
+    )
     if not division:
         warnings.append("Division was not detected.")
 
@@ -839,6 +900,7 @@ def parse_pulte_placement(
     region, region_warning = _region_from_placement(
         placement_name,
         division,
+        business_division,
         tracking,
     )
     if region_warning:
@@ -881,6 +943,7 @@ def parse_pulte_placement(
         "medium": medium,
         "dimension": _find_dimension(placement_name),
         "division": division,
+        "business_division": business_division,
         "brand": brand,
         "campaign": campaign,
         "ad_campaign": positional_campaign or campaign,
@@ -1115,7 +1178,9 @@ def build_cmp_code(
         ("Content", content_value),
         ("Campaign", parsed["campaign"]),
         ("Vendor", "Assembly"),
-        ("Image", image_category),
+        # 1x1/tracking placements may not carry an image taxonomy.
+        # In that case use the official workbook's Choose Value = NA-_-.
+        ("Image", image_category or "Choose Value"),
     ]
 
     codes: dict[str, str] = {}
