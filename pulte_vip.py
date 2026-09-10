@@ -606,39 +606,79 @@ def _sem_division_candidates(
 
     return {value for value in candidates if value}
 
-def _region_alias_matches(text: str, region_row: dict[str, str]) -> bool:
+def _region_alias_matches(
+    text: str,
+    region_row: dict[str, str],
+    business_division: str = "",
+) -> bool:
     """
-    Region can appear as:
-      - category: phoenix
-      - SEM DMA: Phoenix AZ
-      - abbreviation: PHX-_-
-      - short DMA token in placement: PHX AZ / PHX
+    Match only REGION-SPECIFIC evidence.
+
+    Broad division labels must not be allowed to select a region.
+    Example: SEM DMA='Southwest Florida' on the Sarasota row must not
+    cause every Southwest Florida placement to map to SAR.
     """
     normalized_text = _normalize(text)
 
     category = _normalize(region_row["category"])
-    sem_dma = _normalize(region_row["sem_dma"])
+    sem_dma_raw = _clean(region_row["sem_dma"])
+    sem_dma = _normalize(sem_dma_raw)
     abbreviation = _normalize(region_row["abbreviation"])
+    division_norm = _normalize(region_row["division"])
+    business_division_norm = _normalize(business_division)
 
-    abbreviation_short = re.sub(r"[^a-z0-9]", "", region_row["abbreviation"].split("-")[0].lower())
+    abbreviation_short = _normalize(
+        region_row["abbreviation"].split("-")[0]
+    )
 
-    candidates = {
-        category,
-        sem_dma,
-        abbreviation,
-        abbreviation_short,
+    candidates: set[str] = set()
+
+    if category and category != "choosevalue":
+        candidates.add(category)
+
+    if abbreviation:
+        candidates.add(abbreviation)
+
+    if abbreviation_short and len(abbreviation_short) >= 2:
+        candidates.add(abbreviation_short)
+
+    # Exclude broad DMA/division labels from acting as region evidence.
+    broad_labels = {
+        division_norm,
+        business_division_norm,
+        "southwestflorida",
+        "southeastflorida",
+        "southerncalifornia",
+        "northerncalifornia",
+        "coastalcarolinas",
+        "eastcarolina",
+        "newengland",
+        "midatlantic",
+        "centraltexas",
+        "tennessee",
+        "stlouis",
     }
 
-    # Also allow the first DMA word when sufficiently distinctive.
-    dma_words = re.findall(r"[A-Za-z]+", region_row["sem_dma"])
-    if dma_words and len(dma_words[0]) >= 4:
-        candidates.add(_normalize(dma_words[0]))
+    if sem_dma and sem_dma not in broad_labels:
+        candidates.add(sem_dma)
+
+    stop_words = {
+        "fl", "az", "tx", "ca", "nc", "sc", "ga", "mo", "md", "va",
+        "ma", "nh", "ri", "ct", "nm", "wa", "mn", "oh", "mi", "ky",
+        "in", "ny", "pa",
+        "southwest", "southeast", "southern", "northern", "north",
+        "south", "east", "west", "central", "florida", "carolina",
+        "california", "texas", "tennessee",
+    }
+
+    for word in re.findall(r"[A-Za-z]+", sem_dma_raw.lower()):
+        if len(word) >= 4 and word not in stop_words:
+            candidates.add(_normalize(word))
 
     return any(
         candidate and candidate in normalized_text
         for candidate in candidates
     )
-
 
 def _region_from_placement(
     placement_name: str,
@@ -647,17 +687,20 @@ def _region_from_placement(
     tracking: dict,
 ) -> tuple[str, str]:
     """
-    Returns (region, warning).
+    Resolve Region safely.
 
-    Priority:
-      1. Exact region/DMA/abbreviation token found in placement name,
-         scoped to the detected division.
-      2. If that division has exactly one official SEM mapping, use it.
-         This is how Tennessee automatically becomes Nashville.
-      3. If division has multiple possible regions and no region token is
-         present, DO NOT GUESS. Return warning.
+    Examples:
+      Tennessee -> Nashville -> NASH-_-
+      Arizona + Phoenix/PHX -> PHX-_-
+      Arizona + Tucson/TUC -> TUC-_-
+      Southwest Florida + Fort Myers/Alva/Naples -> FMNA-_-
+      Southwest Florida + Sarasota -> SAR-_-
+
+    If a division has multiple valid regions and the placement has no
+    region-specific clue, do not guess.
     """
     rows = tracking["region_rows"]
+    placement_norm = _normalize(placement_name)
 
     sem_divisions = _sem_division_candidates(
         tracking_division,
@@ -669,59 +712,136 @@ def _region_from_placement(
         if _normalize(row["division"]) in sem_divisions
     ]
 
-    # Match placement against the division's permitted regions.
+    # 1. Specific region evidence inside the allowed division.
     scoped_matches = [
         row for row in division_rows
-        if _region_alias_matches(placement_name, row)
+        if _region_alias_matches(
+            placement_name,
+            row,
+            business_division=business_division,
+        )
     ]
 
     if scoped_matches:
-        # Prefer longest category/SEM DMA match.
         winner = max(
             scoped_matches,
             key=lambda row: max(
                 len(_normalize(row["category"])),
                 len(_normalize(row["sem_dma"])),
+                len(_normalize(row["abbreviation"])),
             ),
         )
         return winner["category"], ""
 
-    # Some rows in the official mapping have blank Division.
-    # They can still be used if explicitly present in placement taxonomy.
-    global_matches = [
-        row for row in rows
-        if _region_alias_matches(placement_name, row)
-    ]
+    # 2. Common locality aliases from placement/community naming.
+    locality_aliases = {
+        # Southwest Florida
+        ("Southwest Florida", "fortmyers"): "fort myers-naples",
+        ("Southwest Florida", "ftmyers"): "fort myers-naples",
+        ("Southwest Florida", "alva"): "fort myers-naples",
+        ("Southwest Florida", "naples"): "fort myers-naples",
+        ("Southwest Florida", "sarasota"): "sarasota",
 
-    if len(global_matches) == 1:
-        return global_matches[0]["category"], ""
+        # Arizona
+        ("Arizona", "phoenix"): "phoenix",
+        ("Arizona", "phx"): "phoenix",
+        ("Arizona", "tucson"): "tucson",
+        ("Arizona", "tuc"): "tucson",
 
-    # Unique-division fallback.
-    unique_categories = []
+        # Coastal Carolinas
+        ("Coastal Carolinas", "charleston"): "charleston",
+        ("Coastal Carolinas", "savannah"): "savannah",
+
+        # East Carolina
+        ("East Carolina", "myrtlebeach"): "myrtle beach",
+        ("East Carolina", "wilmington"): "wilmington",
+        ("East Carolina", "wlm"): "wilmington",
+
+        # Mid Atlantic
+        ("Mid Atlantic", "baltimore"): "baltimore",
+        ("Mid Atlantic", "washingtondc"): "dc metro",
+        ("Mid Atlantic", "dcmetro"): "dc metro",
+        ("Mid Atlantic", "marylandbeaches"): "maryland beaches",
+        ("Mid Atlantic", "norfolk"): "northfolk-portsmout-newsport",
+        ("Mid Atlantic", "richmond"): "richmond",
+
+        # New England
+        ("New England", "boston"): "greater boston area",
+        ("New England", "providence"): "greater boston area",
+        ("New England", "hartford"): "hartford-new haven",
+        ("New England", "newhaven"): "hartford-new haven",
+
+        # Northeast Corridor
+        ("Northeast Corridor", "newyork"): "New York",
+        ("Northeast Corridor", "philadelphia"): "philadelphia",
+
+        # Northern California
+        ("Northern California", "sanfrancisco"): "bay area",
+        ("Northern California", "oakland"): "bay area",
+        ("Northern California", "sanjose"): "bay area",
+        ("Northern California", "sacramento"): "sacramento",
+        ("Northern California", "fresno"): "central-valley",
+
+        # Southern California
+        ("Southern California", "losangeles"): "los angeles",
+        ("Southern California", "sandiego"): "southern california",
+
+        # Southeast Florida
+        ("Southeast Florida", "miami"): "Miami-Ft. Lauderdale",
+        ("Southeast Florida", "fortlauderdale"): "Miami-Ft. Lauderdale",
+        ("Southeast Florida", "palmbeach"): "palm beach",
+        ("Southeast Florida", "westpalmbeach"): "palm beach",
+    }
+
+    for (division_name, alias), region_name in sorted(
+        locality_aliases.items(),
+        key=lambda item: len(item[0][1]),
+        reverse=True,
+    ):
+        if (
+            _normalize(division_name) in sem_divisions
+            and alias in placement_norm
+        ):
+            if _lookup_code(tracking, "Region", region_name):
+                return region_name, ""
+
+    # 3. Exactly one official region for the business division -> safe default.
+    unique_categories: list[str] = []
+    seen = set()
+
     for row in division_rows:
-        category = row["category"]
-        if category and _normalize(category) != "choosevalue":
-            if _normalize(category) not in {_normalize(x) for x in unique_categories}:
-                unique_categories.append(category)
+        category = _clean(row["category"])
+        norm = _normalize(category)
+
+        if not category or norm == "choosevalue":
+            continue
+
+        if norm not in seen:
+            seen.add(norm)
+            unique_categories.append(category)
 
     if len(unique_categories) == 1:
         return unique_categories[0], ""
 
-    # Explicit business-safe defaults where the workbook/business taxonomy
-    # has a known umbrella market.
+    # 4. Known one-market hierarchy defaults.
     explicit_defaults = {
-        "Nashville": "nashville",
+        "Tennessee": "nashville",
+        "St. Louis": "st.louis",
+        "Southern Nevada": "las-vegas",
         "Raleigh": "raleigh",
         "San Antonio": "san antonio",
         "West Florida": "tampa",
-        "North Florida": "jacksonville",
-        "Southwest Florida": "fort myers-naples",
         "Charlotte": "charlotte",
-        "Illinois-St. Louis": "st.louis",
-        "Las Vegas": "las-vegas",
+        "Dallas": "dallas",
+        "Georgia": "atlanta",
+        "Houston": "houston",
+        "Michigan": "detroit",
+        "Minnesota": "the twin cities",
+        "New Mexico": "albuquerque",
+        "Pacific Northwest": "seattle",
     }
 
-    preferred = explicit_defaults.get(tracking_division)
+    preferred = explicit_defaults.get(business_division)
     if preferred and _lookup_code(tracking, "Region", preferred):
         return preferred, ""
 
@@ -732,10 +852,9 @@ def _region_from_placement(
         "",
         f"Region could not be resolved safely for division "
         f"'{business_division or tracking_division}'. "
-        "This division has multiple possible DMA/region values and the "
-        "placement name did not contain a recognizable region token.",
+        "This division has multiple possible regions and the placement "
+        "did not contain a specific DMA/city/region signal."
     )
-
 
 def _campaign_from_placement(
     placement_name: str,
