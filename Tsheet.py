@@ -1,6 +1,7 @@
 import csv
 import itertools
 import os
+import io
 from datetime import datetime
 
 import streamlit as st
@@ -199,6 +200,45 @@ def tracking_summary():
         ),
         "total_warnings": total_warnings,
     }
+
+
+def count_prisma_placements(prisma_file):
+    """
+    Count actual placement rows in an uploaded Prisma CSV without changing
+    the file pointer used by the account generator.
+    """
+    if prisma_file is None:
+        return 0
+
+    try:
+        raw = prisma_file.getvalue()
+        decoded = raw.decode("utf-8-sig", errors="replace")
+
+        # Prisma exports are normally comma-delimited, but Sniffer keeps this
+        # safe for tab/semicolon variants too.
+        sample = decoded[:8192]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+        except csv.Error:
+            dialect = csv.excel
+
+        rows = list(csv.reader(io.StringIO(decoded), dialect))
+        if not rows:
+            return 0
+
+        # Remove fully blank rows.
+        rows = [
+            row for row in rows
+            if any(str(cell).strip() for cell in row)
+        ]
+        if len(rows) <= 1:
+            return 0
+
+        # First nonblank row is the Prisma header.
+        return max(len(rows) - 1, 0)
+
+    except Exception:
+        return 0
 
 
 # ============================================================
@@ -419,7 +459,7 @@ if selected_account == "Pulte":
                         )
                     )
 
-                ads_processed = 0
+                ads_processed = count_prisma_placements(prisma_file)
 
                 log_dashboard_usage(
                     account="Pulte",
@@ -548,7 +588,7 @@ elif selected_account == "Pulte VIP":
                         )
                     )
 
-                ads_processed = 0
+                ads_processed = count_prisma_placements(prisma_file)
 
                 log_dashboard_usage(
                     account="Pulte VIP",
