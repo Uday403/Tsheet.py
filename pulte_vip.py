@@ -463,13 +463,37 @@ def _medium_from_placement(
     source: str,
     tracking: dict,
 ) -> str:
+    """
+    Resolve CMP Medium.
+
+    IMPORTANT:
+    Realtor, Zillow and NewHomeSource are endemic publisher buys for Pulte.
+    Their source classification takes priority over generic words such as
+    "Display" in the Prisma placement taxonomy.
+
+    Example:
+      Direct_Display_..._Realtor_...
+      -> Medium = Endemic
+      -> END-_-
+    """
+    source_norm = _normalize(source)
+
+    # Publisher/source classification has highest priority for endemic buys.
+    if source_norm in {
+        "realtor",
+        "zillowcom",
+        "newhomesourcecom",
+    }:
+        return "Endemic"
+
+    # For non-endemic sources, use the official Medium taxonomy first.
     detected = _match_tracking_category(placement_name, tracking, "Medium")
     if detected:
         return detected
 
     normalized = _normalize(placement_name)
 
-    # Placement-taxonomy aliases.
+    # Placement-taxonomy aliases for non-endemic media.
     if "programmatic" in normalized:
         return "Programmatic"
     if "display" in normalized:
@@ -478,14 +502,6 @@ def _medium_from_placement(
         return "Video"
     if "socialpaid" in normalized or "paidsocial" in normalized:
         return "Social Paid"
-
-    # Endemic sources such as Realtor/Zillow/NHS commonly use Endemic.
-    if _normalize(source) in {
-        "realtor",
-        "zillowcom",
-        "newhomesourcecom",
-    }:
-        return "Endemic"
 
     return ""
 
