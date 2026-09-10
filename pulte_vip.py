@@ -714,7 +714,8 @@ def _region_from_prisma_dma_token(
 
     # (business division, accepted placement tokens) -> official Region value
     rules = [
-        ("Southwest Florida", {"fmfl", "fmna", "fortmyers", "ftmyers", "naples", "alva"}, "fort myers-naples"),
+        ("Southwest Florida", {"fmfl", "fmna", "fortmyers", "ftmyers", "alva"}, "fort myers-naples"),
+        ("Southwest Florida", {"napfl", "nap", "naples", "avemaria"}, "naples"),
         ("Southwest Florida", {"sarfl", "sar", "sarasota"}, "sarasota"),
 
         ("Arizona", {"phxaz", "phx", "phoenix"}, "phoenix"),
@@ -1429,6 +1430,50 @@ def match_landing_url(
     return ""
 
 
+def _region_from_landing_url(
+    landing_url: str,
+    business_division: str,
+    tracking: dict,
+) -> str:
+    """
+    Use the matched landing-page URL as the strongest Region signal.
+
+    Southwest Florida examples:
+      /naples/ or /ave-maria/ -> naples -> NAP-_-
+      /fort-myers/ or /alva/  -> fort myers-naples -> FMNA-_-
+      /sarasota/              -> sarasota -> SAR-_-
+    """
+    url = _clean(landing_url)
+    if not url:
+        return ""
+
+    # Normalize URL path/text so hyphenated locations such as ave-maria and
+    # fort-myers are recognized safely.
+    url_norm = _normalize(re.sub(r"[%+_\-]+", " ", url.lower()))
+    division_norm = _normalize(business_division)
+
+    rules = {
+        "southwestflorida": [
+            (("naples", "avemaria"), "naples"),
+            (("fortmyers", "ftmyers", "alva"), "fort myers-naples"),
+            (("sarasota",), "sarasota"),
+        ],
+        "arizona": [
+            (("phoenix",), "phoenix"),
+            (("tucson",), "tucson"),
+        ],
+    }
+
+    for aliases, region_name in rules.get(division_norm, []):
+        if any(_normalize(alias) in url_norm for alias in aliases):
+            # Only accept a Region that actually exists in the official
+            # tracking workbook.
+            if _lookup_code(tracking, "Region", region_name):
+                return region_name
+
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # CMP CODE
 # ---------------------------------------------------------------------------
@@ -1436,9 +1481,20 @@ def match_landing_url(
 def build_cmp_code(
     parsed: dict[str, str],
     image_category: str,
+    landing_url: str = "",
 ) -> tuple[str, list[str]]:
     tracking = _load_tracking_data()
     warnings: list[str] = []
+
+    # URL is the strongest Region signal when it clearly identifies a market.
+    url_region = _region_from_landing_url(
+        landing_url,
+        parsed.get("business_division", ""),
+        tracking,
+    )
+    if url_region:
+        parsed = dict(parsed)
+        parsed["region"] = url_region
 
     content_value, community_suffix = _content_value(
         parsed["placement_name"],
@@ -1611,6 +1667,7 @@ def populate_traffic_sheet(
         cmp_code, cmp_warnings = build_cmp_code(
             parsed,
             image_category,
+            landing_url,
         )
 
         final_url = _append_cmp(landing_url, cmp_code)
