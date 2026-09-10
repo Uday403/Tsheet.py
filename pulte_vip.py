@@ -966,20 +966,76 @@ def _creative_names(creative_files: Iterable) -> list[str]:
 
 
 def _creative_brand_matches(creative_name: str, brand: str) -> bool:
-    normalized = _normalize(creative_name)
+    """
+    Match Pulte brand codes in creative filenames safely.
 
-    aliases = {
-        "Centex": ("ctx", "centex"),
-        "Del Webb": ("dwb", "delwebb"),
-        "Pulte": ("pulte", "pul"),
-        "DiVosta": ("div", "divosta"),
-        "Wieland": ("jw", "wieland", "johnwieland"),
-        "American West": ("aw", "americanwest"),
+    Supported examples:
+      SWFL_DW_...   -> Del Webb
+      SWFL_DWB_...  -> Del Webb
+      SWFL_PU_...   -> Pulte
+      SWFL_PUL_...  -> Pulte
+      ..._CTX_...   -> Centex
+      ..._CEN_...   -> Centex
+
+    Tokens are compared as filename tokens so short codes such as DW/PU
+    do not accidentally match unrelated text.
+    """
+    stem = Path(creative_name).stem
+    tokens = {
+        _normalize(token)
+        for token in re.split(r"[_\-\s]+", stem)
+        if _normalize(token)
+    }
+    normalized = _normalize(stem)
+
+    token_aliases = {
+        "Centex": {"ctx", "cen", "centex"},
+        "Del Webb": {"dw", "dwb", "delwebb"},
+        "Pulte": {"pu", "pul", "pulte"},
+        "DiVosta": {"div", "divosta"},
+        "Wieland": {"jw", "wieland", "johnwieland"},
+        "American West": {"aw", "americanwest"},
     }
 
-    brand_aliases = aliases.get(brand, ())
-    return any(alias in normalized for alias in brand_aliases)
+    aliases = token_aliases.get(brand, set())
 
+    if tokens.intersection(aliases):
+        return True
+
+    # Full brand names can appear without separators.
+    full_aliases = {
+        "Centex": ("centex",),
+        "Del Webb": ("delwebb",),
+        "Pulte": ("pulte",),
+        "DiVosta": ("divosta",),
+        "Wieland": ("johnwieland", "wieland"),
+        "American West": ("americanwest",),
+    }
+
+    return any(alias in normalized for alias in full_aliases.get(brand, ()))
+
+
+def _creative_has_known_brand_marker(creative_name: str) -> bool:
+    stem = Path(creative_name).stem
+    tokens = {
+        _normalize(token)
+        for token in re.split(r"[_\-\s]+", stem)
+        if _normalize(token)
+    }
+    normalized = _normalize(stem)
+
+    short_markers = {
+        "ctx", "cen", "dw", "dwb", "pu", "pul",
+        "div", "jw", "aw",
+    }
+    full_markers = {
+        "centex", "delwebb", "pulte", "divosta",
+        "johnwieland", "wieland", "americanwest",
+    }
+
+    return bool(tokens.intersection(short_markers)) or any(
+        marker in normalized for marker in full_markers
+    )
 
 def _creative_score(
     creative_name: str,
@@ -997,13 +1053,7 @@ def _creative_score(
 
     # Brand is mandatory when creative filename carries recognizable brand
     # abbreviations. This prevents CTX from being selected for Del Webb.
-    known_brand_marker = any(
-        marker in normalized_creative
-        for marker in (
-            "ctx", "centex", "dwb", "delwebb",
-            "divosta", "pulte", "johnwieland",
-        )
-    )
+    known_brand_marker = _creative_has_known_brand_marker(creative_name)
 
     if known_brand_marker:
         if not _creative_brand_matches(creative_name, parsed["brand"]):
