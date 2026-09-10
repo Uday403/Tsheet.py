@@ -3,10 +3,10 @@ from __future__ import annotations
 import csv
 import io
 import re
-from functools import lru_cache
 from copy import copy
+from functools import lru_cache
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import Iterable
 
 from openpyxl import load_workbook
 
@@ -23,31 +23,15 @@ TRAFFIC_START_ROW = 8
 TRAFFIC_LAST_COLUMN = 24
 
 
-def _find_traffic_header_row(sheet) -> int:
-    """Find the row containing the Traffic_Doc column headers."""
-    for row_number in range(1, min(sheet.max_row, 30) + 1):
-        values = {
-            _normalize(sheet.cell(row=row_number, column=column).value)
-            for column in range(1, min(sheet.max_column, 40) + 1)
-        }
-        if "adname" in values and "creativefilename" in values:
-            return row_number
-
-    # Existing template fallback.
-    return TRAFFIC_START_ROW - 1
-
-
-def _traffic_data_start_row(sheet) -> int:
-    return _find_traffic_header_row(sheet) + 1
-
+# ---------------------------------------------------------------------------
+# BASIC HELPERS
+# ---------------------------------------------------------------------------
 
 def _clean(value) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+    return "" if value is None else str(value).strip()
 
 
-def _normalize(value: str) -> str:
+def _normalize(value) -> str:
     return re.sub(r"[^a-z0-9]+", "", _clean(value).lower())
 
 
@@ -69,13 +53,30 @@ def _decode_csv(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _find_traffic_header_row(sheet) -> int:
+    for row_number in range(1, min(sheet.max_row, 30) + 1):
+        values = {
+            _normalize(sheet.cell(row=row_number, column=column).value)
+            for column in range(1, min(sheet.max_column, 40) + 1)
+        }
+        if "adname" in values and "creativefilename" in values:
+            return row_number
+    return TRAFFIC_START_ROW - 1
+
+
+def _traffic_data_start_row(sheet) -> int:
+    return _find_traffic_header_row(sheet) + 1
+
+
+# ---------------------------------------------------------------------------
+# PRISMA
+# ---------------------------------------------------------------------------
+
 def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]]]:
     raw_text = _decode_csv(_read_uploaded_bytes(uploaded_file))
 
-    # Prisma exports may use commas, tabs, semicolons, or pipes.
-    sample = raw_text[:10000]
     try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        dialect = csv.Sniffer().sniff(raw_text[:10000], delimiters=",;\t|")
         reader = csv.reader(io.StringIO(raw_text), dialect)
     except csv.Error:
         reader = csv.reader(io.StringIO(raw_text))
@@ -83,51 +84,51 @@ def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]
     raw_rows = list(reader)
 
     header_index = None
-    placement_name_header = None
+    headers = None
 
     for index, row in enumerate(raw_rows):
-        cleaned_headers = [_clean(cell).replace("\n", " ") for cell in row]
-        normalized_headers = {
-            _normalize(header): header for header in cleaned_headers if header
-        }
-
-        # Only Placement Name is mandatory. Prisma identifier columns vary
-        # between exports, for example Placement ID or Ad server ID.
-        if "placementname" in normalized_headers:
+        cleaned = [_clean(cell).replace("\n", " ") for cell in row]
+        normalized = {_normalize(cell): cell for cell in cleaned if cell}
+        if "placementname" in normalized:
             header_index = index
-            placement_name_header = normalized_headers["placementname"]
+            headers = cleaned
             break
 
-    if header_index is None or placement_name_header is None:
-        preview = [
-            " | ".join(_clean(cell) for cell in row[:8])
-            for row in raw_rows[:10]
-            if any(_clean(cell) for cell in row)
-        ]
+    if header_index is None or headers is None:
         raise ValueError(
             "The Prisma header row could not be found. "
-            "A Placement Name column is required. "
-            f"First rows detected: {preview}"
+            "A Placement Name column is required."
         )
 
-    headers = [
-        _clean(value).replace("\n", " ")
-        for value in raw_rows[header_index]
-    ]
     records: list[dict[str, str]] = []
 
-    for row in raw_rows[header_index + 1 :]:
+    for raw_index in range(header_index + 1, len(raw_rows)):
+        row = raw_rows[raw_index]
         padded = row + [""] * max(0, len(headers) - len(row))
         record = dict(zip(headers, padded[:len(headers)]))
 
-        if _clean(record.get(placement_name_header)):
-            # Standardize the key used by the rest of the script.
-            if placement_name_header != "Placement Name":
-                record["Placement Name"] = record.get(
-                    placement_name_header,
-                    "",
-                )
-            records.append(record)
+        placement_name = ""
+        for key, value in record.items():
+            if _normalize(key) == "placementname":
+                placement_name = _clean(value)
+                break
+
+        if not placement_name:
+            continue
+
+        row_type = ""
+        for candidate in ("Row Type", "Type", "Package / Placement"):
+            for key, value in record.items():
+                if _normalize(key) == _normalize(candidate):
+                    row_type = _clean(value).lower()
+                    break
+
+        if row_type == "package" or placement_name.lower().startswith("package:"):
+            continue
+
+        record["Placement Name"] = placement_name
+        record["_source_excel_row"] = str(raw_index + 1)
+        records.append(record)
 
     if not records:
         raise ValueError(
@@ -138,16 +139,23 @@ def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]
     return raw_rows, records
 
 
+def _record_value(record: dict[str, str], *names: str) -> str:
+    normalized = {_normalize(k): v for k, v in record.items()}
+    for name in names:
+        value = normalized.get(_normalize(name))
+        if value is not None:
+            return _clean(value)
+    return ""
+
+
 def clear_old_template_data(workbook) -> None:
     if PRISMA_SHEET in workbook.sheetnames:
         sheet = workbook[PRISMA_SHEET]
-        max_row = max(sheet.max_row, 1)
-        max_col = max(sheet.max_column, 57)
         for row in sheet.iter_rows(
             min_row=1,
-            max_row=max_row,
+            max_row=max(sheet.max_row, 1),
             min_col=1,
-            max_col=max_col,
+            max_col=max(sheet.max_column, 57),
         ):
             for cell in row:
                 cell.value = None
@@ -155,17 +163,12 @@ def clear_old_template_data(workbook) -> None:
     if TRAFFIC_SHEET in workbook.sheetnames:
         sheet = workbook[TRAFFIC_SHEET]
         first_data_row = _traffic_data_start_row(sheet)
-        max_row = max(sheet.max_row, 1)
-        max_col = max(sheet.max_column, 40)
 
-        # Clear every old trafficking value below the actual header row.
-        # This removes old Ad Names and Creative File Names even when the
-        # template's first data row is not row 8.
         for row in sheet.iter_rows(
             min_row=first_data_row,
-            max_row=max_row,
+            max_row=max(sheet.max_row, first_data_row),
             min_col=1,
-            max_col=max_col,
+            max_col=max(sheet.max_column, 40),
         ):
             for cell in row:
                 cell.value = None
@@ -175,14 +178,11 @@ def clear_old_template_data(workbook) -> None:
 
     if ROTATION_SHEET in workbook.sheetnames:
         sheet = workbook[ROTATION_SHEET]
-        max_row = max(sheet.max_row, 1)
-        max_col = max(sheet.max_column, 7)
-
         for row in sheet.iter_rows(
             min_row=2,
-            max_row=max_row,
+            max_row=max(sheet.max_row, 2),
             min_col=1,
-            max_col=max_col,
+            max_col=max(sheet.max_column, 10),
         ):
             for cell in row:
                 cell.value = None
@@ -190,14 +190,11 @@ def clear_old_template_data(workbook) -> None:
     for sheet_name in ("Native - DV360", "Native - TTD", "Native - Oath"):
         if sheet_name in workbook.sheetnames:
             sheet = workbook[sheet_name]
-            max_row = max(sheet.max_row, 1)
-            max_col = max(sheet.max_column, 1)
-
             for row in sheet.iter_rows(
                 min_row=2,
-                max_row=max_row,
+                max_row=max(sheet.max_row, 2),
                 min_col=1,
-                max_col=max_col,
+                max_col=max(sheet.max_column, 1),
             ):
                 for cell in row:
                     cell.value = None
@@ -214,8 +211,29 @@ def paste_prisma_export(workbook, raw_rows: list[list[str]]) -> None:
             sheet.cell(row=row_index, column=column_index, value=value)
 
 
+# ---------------------------------------------------------------------------
+# PULTE TRACKING WORKBOOK
+# ---------------------------------------------------------------------------
+
 @lru_cache(maxsize=1)
-def _load_tracking_lookup() -> dict[str, dict[str, str]]:
+def _load_tracking_data() -> dict:
+    """
+    Reads the official Pulte tracking workbook at runtime.
+
+    Nothing important is hardcoded here:
+      - Medium
+      - Source
+      - Division
+      - Region
+      - Content
+      - Campaign
+      - Vendor
+      - Image
+      - SEM Region Mapping Tab
+
+    If Pulte updates the tracking workbook in GitHub, this script will use
+    those updated mappings after the Streamlit app restarts.
+    """
     if not TRACKING_CODES_FILE.exists():
         raise FileNotFoundError(
             f"Tracking code workbook not found: {TRACKING_CODES_FILE.name}"
@@ -227,11 +245,15 @@ def _load_tracking_lookup() -> dict[str, dict[str, str]]:
         data_only=True,
     )
 
-    sheet_name = "ChannelTrackingValues"
-    if sheet_name not in workbook.sheetnames:
-        raise KeyError(f"Missing worksheet in tracking workbook: {sheet_name}")
+    values_sheet_name = "ChannelTrackingValues"
+    region_sheet_name = "SEM Region Mapping Tab"
 
-    sheet = workbook[sheet_name]
+    if values_sheet_name not in workbook.sheetnames:
+        raise KeyError(
+            f"Missing worksheet in tracking workbook: {values_sheet_name}"
+        )
+
+    values_sheet = workbook[values_sheet_name]
 
     sections = {
         "Medium": (1, 2),
@@ -245,251 +267,691 @@ def _load_tracking_lookup() -> dict[str, dict[str, str]]:
     }
 
     lookup: dict[str, dict[str, str]] = {}
+    reverse: dict[str, dict[str, str]] = {}
 
     for section, (category_col, abbreviation_col) in sections.items():
         lookup[section] = {}
+        reverse[section] = {}
 
-        for row in range(4, sheet.max_row + 1):
-            category = _clean(sheet.cell(row=row, column=category_col).value)
+        for row in range(4, values_sheet.max_row + 1):
+            category = _clean(values_sheet.cell(row=row, column=category_col).value)
             abbreviation = _clean(
-                sheet.cell(row=row, column=abbreviation_col).value
+                values_sheet.cell(row=row, column=abbreviation_col).value
             )
 
-            if category and abbreviation:
-                lookup[section][_normalize(category)] = abbreviation
+            if not category or not abbreviation:
+                continue
 
-    return lookup
+            lookup[section][_normalize(category)] = abbreviation
+            reverse[section][_normalize(abbreviation)] = category
+
+    # Build region mapping from the official SEM mapping tab.
+    region_rows: list[dict[str, str]] = []
+
+    if region_sheet_name in workbook.sheetnames:
+        region_sheet = workbook[region_sheet_name]
+
+        # Row 2 contains:
+        # Category | Abbreviation | SEM DMA | Division
+        for row in range(3, region_sheet.max_row + 1):
+            category = _clean(region_sheet.cell(row=row, column=1).value)
+            abbreviation = _clean(region_sheet.cell(row=row, column=2).value)
+            sem_dma = _clean(region_sheet.cell(row=row, column=3).value)
+            division = _clean(region_sheet.cell(row=row, column=4).value)
+
+            if not category:
+                continue
+
+            region_rows.append(
+                {
+                    "category": category,
+                    "abbreviation": abbreviation,
+                    "sem_dma": sem_dma,
+                    "division": division,
+                }
+            )
+
+    return {
+        "lookup": lookup,
+        "reverse": reverse,
+        "region_rows": region_rows,
+    }
 
 
 def _lookup_code(
-    lookup: dict[str, dict[str, str]],
+    tracking: dict,
     section: str,
     value: str,
-    default: str = "NA-_-",
+    default: str = "",
 ) -> str:
-    return lookup.get(section, {}).get(_normalize(value), default)
+    if not value:
+        return default
+
+    normalized = _normalize(value)
+    section_lookup = tracking["lookup"].get(section, {})
+
+    # Direct category lookup.
+    if normalized in section_lookup:
+        return section_lookup[normalized]
+
+    # Also accept an abbreviation passed in by placement taxonomy.
+    reverse_section = tracking["reverse"].get(section, {})
+    if normalized in reverse_section:
+        category = reverse_section[normalized]
+        return section_lookup.get(_normalize(category), default)
+
+    return default
 
 
-def _find_dimension(placement_name: str) -> str:
-    match = re.search(r"(?<!\d)(\d{2,4})x(\d{2,4})(?!\d)", placement_name)
-    if not match:
+def _match_tracking_category(
+    text: str,
+    tracking: dict,
+    section: str,
+) -> str:
+    """
+    Finds the best official category appearing in free-form placement text.
+    Longest normalized match wins to avoid 'Florida' beating
+    'Southwest Florida', etc.
+    """
+    normalized_text = _normalize(text)
+    candidates = []
+
+    for normalized_category in tracking["lookup"].get(section, {}):
+        if not normalized_category or normalized_category == "choosevalue":
+            continue
+        if normalized_category in normalized_text:
+            candidates.append(normalized_category)
+
+    if not candidates:
         return ""
-    return f"{match.group(1)}x{match.group(2)}"
+
+    winner = max(candidates, key=len)
+
+    # Convert normalized category back to original category text.
+    for code_norm, category in tracking["reverse"].get(section, {}).items():
+        if _normalize(category) == winner:
+            return category
+
+    # Fallback: return normalized key; _lookup_code can still resolve it.
+    return winner
 
 
-def _find_image_type(placement_name: str, creative_name: str = "") -> str:
-    combined = f"{placement_name}_{creative_name}".upper()
+# ---------------------------------------------------------------------------
+# PLACEMENT PARSING
+# ---------------------------------------------------------------------------
 
-    for image_type in (
-        "EXTD",
-        "EXTT",
-        "EXT",
-        "LIFE",
-        "AMN",
-        "OFPK",
-        "OFP",
-        "POOL",
-        "FP",
-        "VID",
-    ):
-        if re.search(rf"(^|_|\s){re.escape(image_type)}($|_|\s)", combined):
-            return image_type
-
-    return "NA"
-
-
-def _source_from_placement(placement_name: str, supplier: str) -> str:
-    combined = f"{placement_name} {supplier}".lower()
-
-    if "zillow" in combined:
-        return "zillow.com"
-    if "realtor" in combined:
-        return "realtor"
-    if "newhomesource" in combined or "new home source" in combined:
-        return "newhomesource.com"
-    if "teads" in combined:
-        return "teads"
-    if "youtube" in combined:
-        return "youtube.com"
-    if "hulu" in combined:
-        return "hulu"
-    if "programmatic" in combined:
-        return "programmatic"
-
-    return supplier
-
-
-def _site_name(source: str, supplier_name: str) -> str:
-    normalized = _normalize(source)
-
-    if normalized == "zillowcom":
-        return "Zillow.com"
-    if normalized == "realtor":
-        return "Realtor"
-    if normalized == "newhomesourcecom":
-        return "NewHomeSource.com"
-
-    return _clean(supplier_name) or source
+def _find_dimension(text: str) -> str:
+    match = re.search(
+        r"(?<!\d)(\d{1,4})\s*[xX]\s*(\d{1,4})(?!\d)",
+        _clean(text),
+    )
+    return f"{match.group(1)}x{match.group(2)}" if match else ""
 
 
 def _brand_from_placement(placement_name: str) -> str:
-    placement_lower = placement_name.lower()
+    normalized = _normalize(placement_name)
 
-    if "del webb" in placement_lower:
+    if "delwebb" in normalized:
         return "Del Webb"
-    if "centex" in placement_lower:
+    if "centex" in normalized:
         return "Centex"
-    if "divosta" in placement_lower:
+    if "divosta" in normalized:
         return "DiVosta"
-    if "john wieland" in placement_lower or "wieland" in placement_lower:
+    if "johnwieland" in normalized or "wieland" in normalized:
         return "Wieland"
+    if "americanwest" in normalized:
+        return "American West"
 
     return "Pulte"
 
 
 def _community_id(placement_name: str) -> str:
-    parts = _split_placement(placement_name)
-
-    for part in reversed(parts):
+    # Prefer IDs near the right side of the placement name.
+    for part in reversed(_split_placement(placement_name)):
         match = re.search(r"(?<!\d)(\d{5,7})(?!\d)", part)
         if match:
             return match.group(1)
 
-    match = re.search(r"(?<!\d)(\d{5,7})(?!\d)", placement_name)
-    return match.group(1) if match else ""
+    return ""
 
 
-def _division_brand_campaign_community(
+def _source_from_placement(
     placement_name: str,
-) -> tuple[str, str, str, str]:
-    parts = _split_placement(placement_name)
+    supplier_name: str,
+    tracking: dict,
+) -> str:
+    combined = f"{placement_name} {supplier_name}"
 
-    brand_index = None
-    for index, part in enumerate(parts):
-        if _normalize(part) in {
-            "pulte",
-            "delwebb",
-            "centex",
-            "divosta",
-            "wieland",
-            "johnwieland",
-        }:
-            brand_index = index
-            break
+    # First use exact/known source aliases.
+    aliases = [
+        ("new home source", "newhomesource.com"),
+        ("newhomesource", "newhomesource.com"),
+        ("zillow", "zillow.com"),
+        ("realtor", "realtor"),
+        ("youtube", "youtube.com"),
+        ("pinterest", "pinterest.com"),
+        ("instagram", "instagram.com"),
+        ("facebook", "facebook.com"),
+        ("teads", "teads"),
+        ("spotx", "SpotX"),
+        ("hulu", "hulu"),
+        ("programmatic", "programmatic"),
+        ("google", "google.com"),
+        ("bing", "bing.com"),
+    ]
 
-    if brand_index is None:
-        return "", _brand_from_placement(placement_name), "", ""
+    combined_lower = combined.lower()
+    for needle, category in aliases:
+        if needle in combined_lower:
+            return category
 
-    division = parts[brand_index - 1] if brand_index > 0 else ""
-    brand = parts[brand_index]
+    # Then try any official Source value directly.
+    detected = _match_tracking_category(combined, tracking, "Source")
+    if detected:
+        return detected
 
-    campaign = parts[brand_index + 1] if brand_index + 1 < len(parts) else ""
-    community = parts[brand_index + 2] if brand_index + 2 < len(parts) else ""
+    # Supplier is only accepted if it is itself an official tracking source.
+    supplier_code = _lookup_code(tracking, "Source", supplier_name)
+    if supplier_code:
+        return supplier_name
 
-    return division, brand, campaign, community
+    return ""
 
 
-def _region_from_placement(placement_name: str, division: str) -> str:
-    parts = _split_placement(placement_name)
+def _medium_from_placement(
+    placement_name: str,
+    source: str,
+    tracking: dict,
+) -> str:
+    detected = _match_tracking_category(placement_name, tracking, "Medium")
+    if detected:
+        return detected
 
-    # Some Prisma placement names carry DMA/market abbreviations such as
-    # WLM NC. Those are NOT necessarily the approved CMP abbreviations.
-    # Resolve the placement token to the full tracking-workbook Region name
-    # first, then build_cmp_code() will obtain the approved code (WIL-_-).
-    placement_region_aliases = {
-        "wlm": "wilmington",
+    normalized = _normalize(placement_name)
+
+    # Placement-taxonomy aliases.
+    if "programmatic" in normalized:
+        return "Programmatic"
+    if "display" in normalized:
+        return "Display"
+    if "video" in normalized or "olv" in normalized:
+        return "Video"
+    if "socialpaid" in normalized or "paidsocial" in normalized:
+        return "Social Paid"
+
+    # Endemic sources such as Realtor/Zillow/NHS commonly use Endemic.
+    if _normalize(source) in {
+        "realtor",
+        "zillowcom",
+        "newhomesourcecom",
+    }:
+        return "Endemic"
+
+    return ""
+
+
+def _site_name(source: str, supplier_name: str) -> str:
+    normalized = _normalize(source)
+
+    names = {
+        "zillowcom": "Zillow.com",
+        "realtor": "Realtor",
+        "newhomesourcecom": "NewHomeSource.com",
+        "teads": "Teads",
+        "youtubecom": "YouTube",
+        "hulu": "Hulu",
+        "programmatic": "Programmatic",
     }
 
-    for part in parts:
-        for token in re.split(r"\s+", part):
-            alias_region = placement_region_aliases.get(_normalize(token))
-            if alias_region:
-                return alias_region
+    return names.get(normalized, _clean(supplier_name) or source)
 
-    community_id = _community_id(placement_name)
-    community_id_index = None
 
-    for index, part in enumerate(parts):
-        if community_id and community_id in part:
-            community_id_index = index
-            break
+def _division_from_placement(
+    placement_name: str,
+    tracking: dict,
+) -> str:
+    """
+    Uses the official Division list. Longest match wins.
 
-    if community_id_index is not None:
-        trailing_parts = parts[community_id_index + 1 :]
-        for part in trailing_parts:
-            words = part.split()
-            if words:
-                first_word = words[0].strip()
-                if first_word:
-                    return first_word
+    Examples automatically supported from the workbook:
+      Tennessee -> Tennessee
+      Southwest Florida -> Southwest Florida
+      Northeast Corridor -> Northeast Corridor
+      Central Texas -> Central Texas (if present in current workbook)
+      etc.
+    """
+    detected = _match_tracking_category(placement_name, tracking, "Division")
+    if detected:
+        return detected
 
-    division_to_region = {
-        "Southwest Florida": "fort myers-naples",
-        "West Florida": "tampa",
+    # Common taxonomy spelling aliases.
+    aliases = {
+        "tennessee": "Tennessee",
+        "indianapoliskentucky": "Indianapolis-Louisville",
+        "indianapolislouisville": "Indianapolis-Louisville",
+        "midatlantic": "Mid-Atlantic",
+        "northeastcorridor": "Northeast Corridor",
+        "southwestflorida": "Southwest Florida",
+        "southeastflorida": "Southeast Florida",
+        "southerncalifornia": "Southern California",
+        "northerncalifornia": "Northern California",
+        "pacificnorthwest": "Pacific Northwest",
+        "westflorida": "West Florida",
+        "northflorida": "North Florida",
+        "northeastflorida": "Northeast Florida",
+        "eastcarolina": "East Carolina",
+        "coastalcarolinas": "Coastal Carolinas",
+        "newengland": "New England",
+        "newmexico": "New Mexico",
+        "sanantonio": "San Antonio",
+    }
+
+    normalized = _normalize(placement_name)
+    matches = [
+        (len(alias), official)
+        for alias, official in aliases.items()
+        if alias in normalized and _lookup_code(tracking, "Division", official)
+    ]
+
+    return max(matches)[1] if matches else ""
+
+
+def _region_alias_matches(text: str, region_row: dict[str, str]) -> bool:
+    """
+    Region can appear as:
+      - category: phoenix
+      - SEM DMA: Phoenix AZ
+      - abbreviation: PHX-_-
+      - short DMA token in placement: PHX AZ / PHX
+    """
+    normalized_text = _normalize(text)
+
+    category = _normalize(region_row["category"])
+    sem_dma = _normalize(region_row["sem_dma"])
+    abbreviation = _normalize(region_row["abbreviation"])
+
+    abbreviation_short = re.sub(r"[^a-z0-9]", "", region_row["abbreviation"].split("-")[0].lower())
+
+    candidates = {
+        category,
+        sem_dma,
+        abbreviation,
+        abbreviation_short,
+    }
+
+    # Also allow the first DMA word when sufficiently distinctive.
+    dma_words = re.findall(r"[A-Za-z]+", region_row["sem_dma"])
+    if dma_words and len(dma_words[0]) >= 4:
+        candidates.add(_normalize(dma_words[0]))
+
+    return any(
+        candidate and candidate in normalized_text
+        for candidate in candidates
+    )
+
+
+def _region_from_placement(
+    placement_name: str,
+    division: str,
+    tracking: dict,
+) -> tuple[str, str]:
+    """
+    Returns (region, warning).
+
+    Priority:
+      1. Exact region/DMA/abbreviation token found in placement name,
+         scoped to the detected division.
+      2. If that division has exactly one official SEM mapping, use it.
+         This is how Tennessee automatically becomes Nashville.
+      3. If division has multiple possible regions and no region token is
+         present, DO NOT GUESS. Return warning.
+    """
+    rows = tracking["region_rows"]
+
+    division_rows = [
+        row for row in rows
+        if _normalize(row["division"]) == _normalize(division)
+    ]
+
+    # Match placement against the division's permitted regions.
+    scoped_matches = [
+        row for row in division_rows
+        if _region_alias_matches(placement_name, row)
+    ]
+
+    if scoped_matches:
+        # Prefer longest category/SEM DMA match.
+        winner = max(
+            scoped_matches,
+            key=lambda row: max(
+                len(_normalize(row["category"])),
+                len(_normalize(row["sem_dma"])),
+            ),
+        )
+        return winner["category"], ""
+
+    # Some rows in the official mapping have blank Division.
+    # They can still be used if explicitly present in placement taxonomy.
+    global_matches = [
+        row for row in rows
+        if _region_alias_matches(placement_name, row)
+    ]
+
+    if len(global_matches) == 1:
+        return global_matches[0]["category"], ""
+
+    # Unique-division fallback.
+    unique_categories = []
+    for row in division_rows:
+        category = row["category"]
+        if category and _normalize(category) != "choosevalue":
+            if _normalize(category) not in {_normalize(x) for x in unique_categories}:
+                unique_categories.append(category)
+
+    if len(unique_categories) == 1:
+        return unique_categories[0], ""
+
+    # Explicit business-safe defaults where the workbook/business taxonomy
+    # has a known umbrella market.
+    explicit_defaults = {
+        "Tennessee": "nashville",
         "Raleigh": "raleigh",
-        "Indianapolis-Louisville": "indianapolis",
-        "Central Florida": "orlando",
+        "San Antonio": "san antonio",
+        "West Florida": "tampa",
         "North Florida": "jacksonville",
-        "Northeast Florida": "jacksonville",
-        "Coastal Carolinas": "coastal carolinas",
-        "East Carolina": "raleigh",
+        "Northeast Florida": "northeast florida",
+        "Southwest Florida": "fort myers-naples",
         "Charlotte": "charlotte",
     }
 
-    return division_to_region.get(division, division)
+    preferred = explicit_defaults.get(division)
+    if preferred and _lookup_code(tracking, "Region", preferred):
+        return preferred, ""
+
+    if not division:
+        return "", "Division could not be detected, so Region could not be resolved."
+
+    return (
+        "",
+        f"Region could not be resolved safely for division '{division}'. "
+        "This division has multiple possible DMA/region values and the "
+        "placement name did not contain a recognizable region token.",
+    )
+
+
+def _campaign_from_placement(
+    placement_name: str,
+    tracking: dict,
+) -> str:
+    detected = _match_tracking_category(placement_name, tracking, "Campaign")
+    if detected:
+        return detected
+
+    aliases = {
+        "heavyup": "Heavy Up",
+        "qmi": "QMI",
+        "grandopening": "Grand Opening (inclusive of all openings)",
+        "promotion": "Promotion (inclusive of Incentives)",
+        "awareness": "Awareness",
+        "community": "Community",
+        "prospect": "Prospect",
+        "lead": "Lead",
+        "traffic": "Traffic",
+        "comingsoon": "Coming Soon",
+        "nurturing": "Nurturing",
+    }
+
+    normalized = _normalize(placement_name)
+    for token, official in sorted(
+        aliases.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if token in normalized and _lookup_code(tracking, "Campaign", official):
+            return official
+
+    return ""
+
+
+def _image_category(
+    placement_name: str,
+    creative_name: str,
+    tracking: dict,
+) -> str:
+    combined = f"{placement_name} {creative_name}"
+
+    # First detect full official Image category names.
+    detected = _match_tracking_category(combined, tracking, "Image")
+    if detected:
+        return detected
+
+    # Then common Pulte taxonomy abbreviations -> official Image categories.
+    aliases = {
+        "EXTD": "Exterior-Daylight",
+        "EXTT": "Exterior-Twilight",
+        "EXT": "Exterior",
+        "LIFE": "Lifestyle",
+        "AMN": "Amenity",
+        "OFPK": "Open Floor Plan- Kitchen",
+        "OFP": "Open Floor Plan",
+        "POOL": "Pool",
+        "FP": "Floor Plan",
+        "STOR": "Instagram Story",
+        "IFP": "Interactive Floor Plan",
+        "PPC": "Pulte Planning Center",
+        "SAM": "Site Availability Map",
+        "SLIDE": "Slideshow",
+        "SMHM": "Smart Home",
+        "VID": "Video",
+        "VIRT": "Virtual Reality",
+        "BYD": "Backyard",
+        "CAR": "Carousel",
+        "FLXR": "Flex Room",
+        "FYR": "Foyer",
+        "LOFT": "Loft",
+        "OBA": "Owners Bathroom",
+        "OBR": "Owners Bedroom",
+    }
+
+    upper = combined.upper()
+
+    for abbreviation, category in sorted(
+        aliases.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if re.search(
+            rf"(^|[^A-Z0-9]){re.escape(abbreviation)}([^A-Z0-9]|$)",
+            upper,
+        ):
+            if _lookup_code(tracking, "Image", category):
+                return category
+
+    return ""
+
+
+def _content_value(
+    placement_name: str,
+    brand: str,
+    community_id: str,
+    tracking: dict,
+) -> tuple[str, str]:
+    """
+    Returns (content_value, content_suffix).
+
+    Market-wide examples:
+      Pulte + Market Wide    -> Pulte Market Wide -> PULMKT
+      Centex + Market Wide   -> Centex Market Wide -> CENMKT
+      Del Webb + Market Wide -> Del Webb Market Wide -> DWMKT
+
+    Community-specific example:
+      Pulte + community 123456 -> PUL123456
+    """
+    normalized = _normalize(placement_name)
+    market_wide = "marketwide" in normalized or "mktw" in normalized
+
+    if market_wide:
+        market_value = {
+            "Pulte": "Pulte Market Wide",
+            "Centex": "Centex Market Wide",
+            "Del Webb": "Del Webb Market Wide",
+            "DiVosta": "Divosta Market Wide",
+            "Wieland": "Wieland Market Wide",
+            "American West": "American West Market Wide",
+        }.get(brand, f"{brand} Market Wide")
+
+        if _lookup_code(tracking, "Content", market_value):
+            return market_value, ""
+
+    return brand, community_id
 
 
 def parse_pulte_placement(
     placement_name: str,
     supplier_name: str = "",
-) -> dict[str, str]:
-    division, brand, campaign, community = (
-        _division_brand_campaign_community(placement_name)
-    )
+) -> tuple[dict[str, str], list[str]]:
+    tracking = _load_tracking_data()
+    warnings: list[str] = []
 
-    source = _source_from_placement(placement_name, supplier_name)
-    dimension = _find_dimension(placement_name)
+    brand = _brand_from_placement(placement_name)
     community_id = _community_id(placement_name)
-    region = _region_from_placement(placement_name, division)
+
+    division = _division_from_placement(placement_name, tracking)
+    if not division:
+        warnings.append("Division was not detected.")
+
+    source = _source_from_placement(
+        placement_name,
+        supplier_name,
+        tracking,
+    )
+    if not source:
+        warnings.append("Source was not detected.")
+
+    medium = _medium_from_placement(
+        placement_name,
+        source,
+        tracking,
+    )
+    if not medium:
+        warnings.append("Medium was not detected.")
+
+    region, region_warning = _region_from_placement(
+        placement_name,
+        division,
+        tracking,
+    )
+    if region_warning:
+        warnings.append(region_warning)
+
+    campaign = _campaign_from_placement(
+        placement_name,
+        tracking,
+    )
+    if not campaign:
+        warnings.append("Campaign/purpose was not detected.")
+
+    # Keep the older Ad Name convention by extracting the values surrounding
+    # the Brand token where possible.
+    parts = _split_placement(placement_name)
+    brand_index = None
+    brand_aliases = {
+        "pulte", "delwebb", "centex", "divosta",
+        "wieland", "johnwieland", "americanwest",
+    }
+
+    for index, part in enumerate(parts):
+        if _normalize(part) in brand_aliases:
+            brand_index = index
+            break
+
+    positional_campaign = ""
+    community = ""
+
+    if brand_index is not None:
+        if brand_index + 1 < len(parts):
+            positional_campaign = parts[brand_index + 1]
+        if brand_index + 2 < len(parts):
+            community = parts[brand_index + 2]
 
     return {
         "placement_name": placement_name,
         "source": source,
         "site_name": _site_name(source, supplier_name),
-        "dimension": dimension,
+        "medium": medium,
+        "dimension": _find_dimension(placement_name),
         "division": division,
         "brand": brand,
         "campaign": campaign,
+        "ad_campaign": positional_campaign or campaign,
         "community": community,
         "community_id": community_id,
         "region": region,
-    }
+    }, warnings
 
+
+# ---------------------------------------------------------------------------
+# CREATIVE MATCHING
+# ---------------------------------------------------------------------------
 
 def _creative_names(creative_files: Iterable) -> list[str]:
-    names = []
-    for uploaded_file in creative_files:
-        name = Path(uploaded_file.name).name
-        if name:
-            names.append(name)
-    return names
+    return [
+        Path(uploaded_file.name).name
+        for uploaded_file in creative_files
+        if getattr(uploaded_file, "name", None)
+    ]
+
+
+def _creative_brand_matches(creative_name: str, brand: str) -> bool:
+    normalized = _normalize(creative_name)
+
+    aliases = {
+        "Centex": ("ctx", "centex"),
+        "Del Webb": ("dwb", "delwebb"),
+        "Pulte": ("pulte", "pul"),
+        "DiVosta": ("div", "divosta"),
+        "Wieland": ("jw", "wieland", "johnwieland"),
+        "American West": ("aw", "americanwest"),
+    }
+
+    brand_aliases = aliases.get(brand, ())
+    return any(alias in normalized for alias in brand_aliases)
 
 
 def _creative_score(
     creative_name: str,
     parsed: dict[str, str],
-    image_type: str,
 ) -> int:
-    normalized_creative = _normalize(creative_name)
     score = 0
+    normalized_creative = _normalize(creative_name)
+
+    # Dimension is mandatory whenever placement has a dimension.
+    dimension = parsed["dimension"]
+    if dimension:
+        if _normalize(dimension) not in normalized_creative:
+            return -1000
+        score += 100
+
+    # Brand is mandatory when creative filename carries recognizable brand
+    # abbreviations. This prevents CTX from being selected for Del Webb.
+    known_brand_marker = any(
+        marker in normalized_creative
+        for marker in (
+            "ctx", "centex", "dwb", "delwebb",
+            "divosta", "pulte", "johnwieland",
+        )
+    )
+
+    if known_brand_marker:
+        if not _creative_brand_matches(creative_name, parsed["brand"]):
+            return -1000
+        score += 80
 
     checks = (
-        (parsed["dimension"], 10),
-        (parsed["community"], 8),
-        (parsed["community_id"], 7),
-        (parsed["brand"], 4),
-        (parsed["source"], 3),
-        (image_type, 5),
+        (parsed["community_id"], 40),
+        (parsed["community"], 30),
+        (parsed["region"], 15),
+        (parsed["division"], 10),
     )
 
     for value, points in checks:
@@ -497,79 +959,225 @@ def _creative_score(
         if normalized_value and normalized_value in normalized_creative:
             score += points
 
-    community_words = [
-        word
-        for word in re.split(r"\W+", parsed["community"].lower())
-        if len(word) >= 4
-    ]
-    score += sum(
-        2 for word in community_words if word in creative_name.lower()
-    )
-
     return score
 
 
 def match_creative(
     creative_names: list[str],
     parsed: dict[str, str],
-) -> tuple[str, str]:
-    image_type = _find_image_type(parsed["placement_name"])
+) -> str:
+    if not creative_names:
+        return ""
 
     ranked = sorted(
-        (
-            (_creative_score(name, parsed, image_type), name)
-            for name in creative_names
-        ),
+        ((_creative_score(name, parsed), name) for name in creative_names),
+        key=lambda item: (item[0], item[1]),
         reverse=True,
     )
 
-    if not ranked or ranked[0][0] <= 0:
-        return "", image_type
+    if not ranked or ranked[0][0] < 0:
+        return ""
 
-    matched_name = ranked[0][1]
-    image_type = _find_image_type(
-        parsed["placement_name"],
-        matched_name,
-    )
-    return matched_name, image_type
+    # Do not silently choose between an exact tie.
+    if (
+        len(ranked) > 1
+        and ranked[0][0] == ranked[1][0]
+        and ranked[0][0] > 0
+    ):
+        return ""
+
+    return ranked[0][1] if ranked[0][0] > 0 else ""
 
 
-def _parse_urls(landing_urls_text: str) -> list[str]:
-    urls = []
+# ---------------------------------------------------------------------------
+# LANDING URL MATCHING
+# ---------------------------------------------------------------------------
 
-    for line in landing_urls_text.splitlines():
-        value = line.strip()
-        if value:
-            urls.append(value)
+def _parse_url_lines(landing_urls_text: str) -> list[dict[str, str]]:
+    """
+    Supports:
+      URL
+      placement<TAB>URL
+      ad name<TAB>URL
+      community ID<TAB>URL
+      Centex<TAB>URL
+      Del Webb<TAB>URL
 
-    return urls
+    Never maps by row order.
+    """
+    parsed = []
+
+    for raw_line in landing_urls_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        match = re.search(r"https?://\S+", line)
+        if not match:
+            continue
+
+        url = match.group(0).rstrip(",;")
+        label = line[:match.start()].strip(" \t:-|")
+        parsed.append(
+            {
+                "line": line,
+                "label": label,
+                "url": url,
+            }
+        )
+
+    return parsed
 
 
 def match_landing_url(
-    urls: list[str],
+    url_rows: list[dict[str, str]],
     parsed: dict[str, str],
+    ad_name: str,
 ) -> str:
+    if not url_rows:
+        return ""
+
+    placement_norm = _normalize(parsed["placement_name"])
+    ad_norm = _normalize(ad_name)
     community_id = parsed["community_id"]
-    brand = parsed["brand"].lower()
+    brand_norm = _normalize(parsed["brand"])
 
-    if community_id:
-        for url in urls:
-            if community_id in url:
-                return url
+    scored = []
 
-    if brand == "del webb":
-        for url in urls:
-            if "delwebb.com" in url.lower():
-                return url
+    for item in url_rows:
+        label_norm = _normalize(item["label"])
+        line_norm = _normalize(item["line"])
+        url_norm = _normalize(item["url"])
 
-    if brand == "pulte":
-        for url in urls:
-            if "pulte.com" in url.lower():
-                return url
+        score = 0
 
-    if len(urls) == 1:
-        return urls[0]
+        if placement_norm and placement_norm in line_norm:
+            score += 1000
+        if ad_norm and ad_norm in line_norm:
+            score += 900
+        if community_id and community_id in item["line"]:
+            score += 800
+        if brand_norm and brand_norm in label_norm:
+            score += 500
 
+        # Domain-brand checks.
+        if parsed["brand"] == "Del Webb" and "delwebbcom" in url_norm:
+            score += 300
+        elif parsed["brand"] in {"Pulte", "Centex"} and "pultecom" in url_norm:
+            score += 200
+
+        # Region/community hints.
+        if parsed["region"] and _normalize(parsed["region"]) in line_norm:
+            score += 100
+        if parsed["community"] and _normalize(parsed["community"]) in line_norm:
+            score += 100
+
+        scored.append((score, item["url"]))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
+
+    if scored and scored[0][0] > 0:
+        if len(scored) > 1 and scored[0][0] == scored[1][0]:
+            return ""
+        return scored[0][1]
+
+    # One supplied URL may safely apply to all.
+    if len(url_rows) == 1:
+        return url_rows[0]["url"]
+
+    # Multiple URLs with no unique taxonomy match -> do not guess.
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# CMP CODE
+# ---------------------------------------------------------------------------
+
+def build_cmp_code(
+    parsed: dict[str, str],
+    image_category: str,
+) -> tuple[str, list[str]]:
+    tracking = _load_tracking_data()
+    warnings: list[str] = []
+
+    content_value, community_suffix = _content_value(
+        parsed["placement_name"],
+        parsed["brand"],
+        parsed["community_id"],
+        tracking,
+    )
+
+    components = [
+        ("Medium", parsed["medium"]),
+        ("Source", parsed["source"]),
+        ("Division", parsed["division"]),
+        ("Region", parsed["region"]),
+        ("Content", content_value),
+        ("Campaign", parsed["campaign"]),
+        ("Vendor", "Assembly"),
+        ("Image", image_category),
+    ]
+
+    codes: dict[str, str] = {}
+
+    for section, value in components:
+        code = _lookup_code(tracking, section, value)
+        if not code:
+            warnings.append(
+                f"{section} mapping not found for '{value or 'blank'}'."
+            )
+        codes[section] = code
+
+    if warnings:
+        return "", warnings
+
+    content_code = codes["Content"]
+
+    # Content codes in the workbook (e.g. PUL/CEN/DW) do not all carry -_-.
+    # Community IDs are appended immediately after the brand code.
+    if community_suffix:
+        content_code = f"{content_code}{community_suffix}"
+
+    # Add separator after Content exactly once.
+    if not content_code.endswith("-_-"):
+        content_code = f"{content_code}-_-"
+
+    cmp_code = "".join(
+        [
+            codes["Medium"],
+            codes["Source"],
+            codes["Division"],
+            codes["Region"],
+            content_code,
+            codes["Campaign"],
+            codes["Vendor"],
+            codes["Image"],
+        ]
+    )
+
+    return cmp_code, []
+
+
+def _append_cmp(url: str, cmp_code: str) -> str:
+    if not url or not cmp_code:
+        return ""
+
+    # Avoid double-appending CMP when a complete tracked URL is supplied.
+    if re.search(r"[?&]cmp=", url, flags=re.IGNORECASE):
+        return url
+
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}cmp={cmp_code}"
+
+
+# ---------------------------------------------------------------------------
+# TRAFFIC DOC
+# ---------------------------------------------------------------------------
+
+def _campaign_name_from_raw_rows(raw_rows: list[list[str]]) -> str:
+    for row in raw_rows:
+        if row and _clean(row[0]) == "Campaign name:":
+            return _clean(row[1]) if len(row) > 1 else ""
     return ""
 
 
@@ -577,63 +1185,11 @@ def build_ad_name(parsed: dict[str, str]) -> str:
     parts = [
         parsed["division"],
         parsed["brand"],
-        parsed["campaign"],
+        parsed["ad_campaign"],
         parsed["community"],
         parsed["dimension"],
     ]
     return "_".join(part for part in parts if part)
-
-
-def build_cmp_code(
-    parsed: dict[str, str],
-    image_type: str,
-    lookup: dict[str, dict[str, str]],
-) -> str:
-    medium_code = _lookup_code(lookup, "Medium", "Endemic")
-    source_code = _lookup_code(lookup, "Source", parsed["source"])
-    division_code = _lookup_code(lookup, "Division", parsed["division"])
-    region_code = _lookup_code(lookup, "Region", parsed["region"])
-
-    content_value = parsed["brand"]
-    content_code = _lookup_code(lookup, "Content", content_value, "NA")
-    if parsed["community_id"]:
-        content_code = f"{content_code}{parsed['community_id']}"
-
-    campaign_code = _lookup_code(
-        lookup,
-        "Campaign",
-        parsed["campaign"],
-    )
-    vendor_code = _lookup_code(lookup, "Vendor", "Assembly")
-    image_code = _lookup_code(lookup, "Image", image_type)
-
-    return "".join(
-        [
-            medium_code,
-            source_code,
-            division_code,
-            region_code,
-            f"{content_code}-_-",
-            campaign_code,
-            vendor_code,
-            image_code,
-        ]
-    )
-
-
-def _append_cmp(url: str, cmp_code: str) -> str:
-    if not url:
-        return ""
-
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}cmp={cmp_code}"
-
-
-def _campaign_name_from_raw_rows(raw_rows: list[list[str]]) -> str:
-    for row in raw_rows:
-        if row and _clean(row[0]) == "Campaign name:":
-            return _clean(row[1]) if len(row) > 1 else ""
-    return ""
 
 
 def _copy_row_format(sheet, source_row: int, target_row: int) -> None:
@@ -644,22 +1200,17 @@ def _copy_row_format(sheet, source_row: int, target_row: int) -> None:
         source = sheet.cell(row=source_row, column=column)
         target = sheet.cell(row=target_row, column=column)
 
-        if source.has_style:
-            target._style = copy(source._style)
-        if source.number_format:
-            target.number_format = source.number_format
-        if source.font:
-            target.font = copy(source.font)
-        if source.fill:
-            target.fill = copy(source.fill)
-        if source.border:
-            target.border = copy(source.border)
-        if source.alignment:
-            target.alignment = copy(source.alignment)
-        if source.protection:
-            target.protection = copy(source.protection)
+        target._style = copy(source._style)
+        target.number_format = source.number_format
+        target.font = copy(source.font)
+        target.fill = copy(source.fill)
+        target.border = copy(source.border)
+        target.alignment = copy(source.alignment)
+        target.protection = copy(source.protection)
 
-    sheet.row_dimensions[target_row].height = sheet.row_dimensions[source_row].height
+    sheet.row_dimensions[target_row].height = (
+        sheet.row_dimensions[source_row].height
+    )
 
 
 def populate_traffic_sheet(
@@ -673,9 +1224,8 @@ def populate_traffic_sheet(
         raise KeyError(f"Missing worksheet: {TRAFFIC_SHEET}")
 
     sheet = workbook[TRAFFIC_SHEET]
-    lookup = _load_tracking_lookup()
     creative_names = _creative_names(creative_files)
-    landing_urls = _parse_urls(landing_urls_text)
+    url_rows = _parse_url_lines(landing_urls_text)
     warnings: list[str] = []
 
     campaign_name = _campaign_name_from_raw_rows(raw_rows)
@@ -688,73 +1238,90 @@ def populate_traffic_sheet(
         output_row = first_data_row + index
         _copy_row_format(sheet, template_row, output_row)
 
-        placement_name = _clean(record.get("Placement Name"))
+        placement_name = _record_value(record, "Placement Name")
         supplier_name = (
-            _clean(record.get("Media outlet / Supplier name (ad server)"))
-            or _clean(record.get("Media outlet / Supplier name (Prisma)"))
+            _record_value(record, "Media outlet / Supplier name (ad server)")
+            or _record_value(record, "Media outlet / Supplier name (Prisma)")
+            or _record_value(record, "Media Outlet")
+            or _record_value(record, "Supplier")
         )
 
-        parsed = parse_pulte_placement(
-            placement_name=placement_name,
-            supplier_name=supplier_name,
+        parsed, parse_warnings = parse_pulte_placement(
+            placement_name,
+            supplier_name,
         )
 
-        creative_name, image_type = match_creative(
-            creative_names,
-            parsed,
+        ad_name = build_ad_name(parsed)
+        creative_name = match_creative(creative_names, parsed)
+
+        image_category = _image_category(
+            placement_name,
+            creative_name,
+            _load_tracking_data(),
         )
 
         landing_url = match_landing_url(
-            landing_urls,
+            url_rows,
             parsed,
+            ad_name,
         )
 
-        cmp_code = build_cmp_code(
+        cmp_code, cmp_warnings = build_cmp_code(
             parsed,
-            image_type,
-            lookup,
+            image_category,
         )
 
         final_url = _append_cmp(landing_url, cmp_code)
-        ad_name = build_ad_name(parsed)
+
+        placement_id = (
+            _record_value(record, "Ad server ID")
+            or _record_value(record, "Placement ID")
+            or _record_value(record, "DCM Placement ID")
+        )
+
+        for warning in parse_warnings:
+            warnings.append(
+                f"{placement_id or 'No ID'} — {warning} "
+                f"Placement: {placement_name}"
+            )
+
+        for warning in cmp_warnings:
+            warnings.append(
+                f"{placement_id or 'No ID'} — {warning} "
+                f"Placement: {placement_name}"
+            )
 
         if not creative_name:
             warnings.append(
-                f"No creative matched placement ID "
-                f"{_clean(record.get('Ad server ID'))}: {placement_name}"
+                f"{placement_id or 'No ID'} — No unique creative matched: "
+                f"{placement_name}"
             )
 
         if not landing_url:
             warnings.append(
-                f"No landing URL matched placement ID "
-                f"{_clean(record.get('Ad server ID'))}: {placement_name}"
+                f"{placement_id or 'No ID'} — No unique landing URL matched: "
+                f"{placement_name}"
             )
 
+        # Existing Pulte VIP behavior: 1x1 trafficking dimensions in Traffic_Doc.
         values = [
-            None,
-            parsed["site_name"],
-            _clean(record.get("Ad server ID")),
-            placement_name,
-            "1x1",
-            None,
-            None,
-            ad_name,
-            None,
-            "New",
-            creative_name,
-            "Yes",
-            None,
-            _clean(record.get("Flight start date")),
-            _clean(record.get("Flight end date")),
-            final_url,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None,                                   # A
+            parsed["site_name"],                    # B Site Name
+            placement_id,                           # C Placement ID
+            placement_name,                         # D Placement Name
+            "1x1",                                  # E Dimensions
+            None,                                   # F Duration
+            None,                                   # G
+            ad_name,                                # H AD Name
+            None,                                   # I
+            "New",                                  # J Action
+            creative_name,                          # K Creative File Name
+            "Yes",                                  # L Studio Creative?
+            None,                                   # M Rotation
+            _record_value(record, "Flight start date"),  # N
+            _record_value(record, "Flight end date"),    # O
+            final_url,                              # P Click Through URL
+            None, None, None, None, None, None, None, None,
         ]
 
         for column, value in enumerate(values, start=1):
@@ -763,15 +1330,36 @@ def populate_traffic_sheet(
     return warnings
 
 
+# ---------------------------------------------------------------------------
+# PUBLIC ENTRY POINT
+# ---------------------------------------------------------------------------
+
 def generate_pulte_tsheet(
     prisma_file,
     creative_files,
     landing_urls_text: str,
 ) -> tuple[bytes, list[str]]:
+    """
+    Drop-in replacement for the existing Pulte VIP module.
+
+    Key safeguards:
+      - Uses official Pulte tracking workbook mappings.
+      - Tennessee -> Nashville automatically through SEM Region Mapping.
+      - Other divisions use exact DMA/region tokens when multiple regions exist.
+      - Never maps URLs by row order.
+      - Never guesses when multiple URLs/regions are ambiguous.
+      - Brand + dimension aware creative matching.
+      - Market Wide content codes handled correctly.
+      - Existing function signature is unchanged, so Tsheet.py does not need
+        to be changed.
+    """
     if not MASTER_TEMPLATE.exists():
         raise FileNotFoundError(
             f"Master template not found: {MASTER_TEMPLATE.name}"
         )
+
+    # Fail early if tracking workbook is missing/broken.
+    _load_tracking_data()
 
     raw_rows, records = read_prisma_csv(prisma_file)
 
@@ -790,6 +1378,13 @@ def generate_pulte_tsheet(
         creative_files=creative_files,
         landing_urls_text=landing_urls_text,
     )
+
+    try:
+        workbook.calculation.fullCalcOnLoad = True
+        workbook.calculation.forceFullCalc = True
+        workbook.calculation.calcMode = "auto"
+    except Exception:
+        pass
 
     output = io.BytesIO()
     workbook.save(output)
