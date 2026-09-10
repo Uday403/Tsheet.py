@@ -680,6 +680,103 @@ def _region_alias_matches(
         for candidate in candidates
     )
 
+def _region_from_prisma_dma_token(
+    placement_name: str,
+    business_division: str,
+    tracking: dict,
+) -> str:
+    """
+    Resolve compact DMA tokens used in Prisma placement names BEFORE
+    broader region matching.
+
+    Examples:
+      FM FL  -> fort myers-naples -> FMNA-_-
+      PHX AZ -> phoenix           -> PHX-_-
+      TUC AZ -> tucson            -> TUC-_-
+      WLM NC -> wilmington        -> WIL-_-
+
+    Matching uses placement segments/tokens rather than loose substring
+    matching, preventing short abbreviations from matching unrelated words.
+    """
+    parts = _split_placement(placement_name)
+
+    # Normalize each underscore-delimited placement segment while preserving
+    # the ability to recognize values such as "FM FL".
+    segment_norms = {_normalize(part) for part in parts if _clean(part)}
+
+    # Also collect individual word tokens for placements where DMA/state are
+    # separated differently.
+    word_tokens = {
+        _normalize(token)
+        for token in re.split(r"[_\s\-]+", placement_name)
+        if _normalize(token)
+    }
+
+    # (business division, accepted placement tokens) -> official Region value
+    rules = [
+        ("Southwest Florida", {"fmfl", "fmna", "fortmyers", "ftmyers", "naples", "alva"}, "fort myers-naples"),
+        ("Southwest Florida", {"sarfl", "sar", "sarasota"}, "sarasota"),
+
+        ("Arizona", {"phxaz", "phx", "phoenix"}, "phoenix"),
+        ("Arizona", {"tucaz", "tuc", "tucson"}, "tucson"),
+
+        ("East Carolina", {"wlmnc", "wlm", "wilmington"}, "wilmington"),
+        ("East Carolina", {"myrsc", "myr", "myrtlebeach"}, "myrtle beach"),
+
+        ("Coastal Carolinas", {"chssc", "chs", "charleston"}, "charleston"),
+        ("Coastal Carolinas", {"savga", "sav", "savannah"}, "savannah"),
+
+        ("Mid Atlantic", {"bwi", "baltimore"}, "baltimore"),
+        ("Mid Atlantic", {"dca", "dc", "dcmetro", "washingtondc"}, "dc metro"),
+        ("Mid Atlantic", {"ric", "richmond"}, "richmond"),
+
+        ("Northeast Corridor", {"nyc", "newyork"}, "New York"),
+        ("Northeast Corridor", {"phl", "philadelphia"}, "philadelphia"),
+
+        ("Southeast Florida", {"mia", "miami", "fortlauderdale", "ftlauderdale"}, "Miami-Ft. Lauderdale"),
+        ("Southeast Florida", {"pbi", "palmbeach", "westpalmbeach"}, "palm beach"),
+
+        ("Northern California", {"sfo", "sjc", "oak", "sanfrancisco", "sanjose", "oakland"}, "bay area"),
+        ("Northern California", {"sac", "sacramento"}, "sacramento"),
+        ("Northern California", {"fat", "fresno"}, "central-valley"),
+
+        ("Southern California", {"lax", "losangeles"}, "los angeles"),
+        ("Southern California", {"san", "sandiego"}, "southern california"),
+    ]
+
+    division_norm = _normalize(business_division)
+
+    for rule_division, aliases, region_name in rules:
+        if _normalize(rule_division) != division_norm:
+            continue
+
+        matched = False
+        for alias in aliases:
+            alias_norm = _normalize(alias)
+
+            # Exact placement segment is strongest, e.g. "FM FL".
+            if alias_norm in segment_norms:
+                matched = True
+                break
+
+            # Allow exact word token only for 3+ character abbreviations or
+            # full locality words. Two-letter codes like FM are intentionally
+            # not used alone.
+            if len(alias_norm) >= 3 and alias_norm in word_tokens:
+                matched = True
+                break
+
+            # Full locality names can appear inside a longer segment.
+            if len(alias_norm) >= 5 and alias_norm in _normalize(placement_name):
+                matched = True
+                break
+
+        if matched and _lookup_code(tracking, "Region", region_name):
+            return region_name
+
+    return ""
+
+
 def _region_from_placement(
     placement_name: str,
     tracking_division: str,
@@ -701,6 +798,17 @@ def _region_from_placement(
     """
     rows = tracking["region_rows"]
     placement_norm = _normalize(placement_name)
+
+    # Highest priority: explicit compact DMA token from Prisma taxonomy.
+    # This fixes placements such as ..._209822_FM FL_PT where the business
+    # division is Southwest Florida but the correct Region is Fort Myers-Naples.
+    dma_region = _region_from_prisma_dma_token(
+        placement_name,
+        business_division,
+        tracking,
+    )
+    if dma_region:
+        return dma_region, ""
 
     sem_divisions = _sem_division_candidates(
         tracking_division,
