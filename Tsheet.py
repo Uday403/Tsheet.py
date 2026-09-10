@@ -204,8 +204,14 @@ def tracking_summary():
 
 def count_prisma_placements(prisma_file):
     """
-    Count actual placement rows in an uploaded Prisma CSV without changing
-    the file pointer used by the account generator.
+    Count only actual Prisma placement rows.
+
+    This follows the same rules used by pulte_vip.py:
+    - locate the real 'Placement Name' header
+    - ignore metadata rows above the header
+    - ignore blank rows
+    - ignore Package rows
+    - count only rows containing a Placement Name
     """
     if prisma_file is None:
         return 0
@@ -214,28 +220,91 @@ def count_prisma_placements(prisma_file):
         raw = prisma_file.getvalue()
         decoded = raw.decode("utf-8-sig", errors="replace")
 
-        # Prisma exports are normally comma-delimited, but Sniffer keeps this
-        # safe for tab/semicolon variants too.
-        sample = decoded[:8192]
         try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+            dialect = csv.Sniffer().sniff(
+                decoded[:10000],
+                delimiters=",;\t|",
+            )
+            rows = list(
+                csv.reader(io.StringIO(decoded), dialect)
+            )
         except csv.Error:
-            dialect = csv.excel
+            rows = list(
+                csv.reader(io.StringIO(decoded))
+            )
 
-        rows = list(csv.reader(io.StringIO(decoded), dialect))
-        if not rows:
+        header_index = None
+        headers = None
+
+        def normalize(value):
+            return "".join(
+                ch.lower()
+                for ch in str(value or "")
+                if ch.isalnum()
+            )
+
+        for index, row in enumerate(rows):
+            cleaned = [
+                str(cell or "").strip().replace("\n", " ")
+                for cell in row
+            ]
+            if any(
+                normalize(cell) == "placementname"
+                for cell in cleaned
+            ):
+                header_index = index
+                headers = cleaned
+                break
+
+        if header_index is None or headers is None:
             return 0
 
-        # Remove fully blank rows.
-        rows = [
-            row for row in rows
-            if any(str(cell).strip() for cell in row)
-        ]
-        if len(rows) <= 1:
-            return 0
+        placement_count = 0
 
-        # First nonblank row is the Prisma header.
-        return max(len(rows) - 1, 0)
+        for row in rows[header_index + 1:]:
+            padded = row + [""] * max(
+                0,
+                len(headers) - len(row),
+            )
+            record = dict(
+                zip(headers, padded[:len(headers)])
+            )
+
+            placement_name = ""
+            row_type = ""
+
+            for key, value in record.items():
+                key_norm = normalize(key)
+
+                if key_norm == "placementname":
+                    placement_name = str(
+                        value or ""
+                    ).strip()
+
+                if key_norm in {
+                    "rowtype",
+                    "type",
+                    "packageplacement",
+                }:
+                    if not row_type:
+                        row_type = str(
+                            value or ""
+                        ).strip().lower()
+
+            if not placement_name:
+                continue
+
+            if (
+                row_type == "package"
+                or placement_name.lower().startswith(
+                    "package:"
+                )
+            ):
+                continue
+
+            placement_count += 1
+
+        return placement_count
 
     except Exception:
         return 0
