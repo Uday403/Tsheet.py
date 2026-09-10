@@ -1,1627 +1,2061 @@
-from __future__ import annotations
-
 import csv
-import io
-import re
-from copy import copy
-from functools import lru_cache
-from pathlib import Path
-from typing import Iterable
+import itertools
+import os
+from datetime import datetime
 
-from openpyxl import load_workbook
+import streamlit as st
 
-
-BASE_DIR = Path(__file__).resolve().parent
-MASTER_TEMPLATE = BASE_DIR / "master_template.xlsm"
-TRACKING_CODES_FILE = BASE_DIR / "Pulte_Adobe_Tracking_Codes.xlsm"
-
-PRISMA_SHEET = "Prisma Export - Paste as values"
-TRAFFIC_SHEET = "Traffic_Doc"
-ROTATION_SHEET = "Multi-Ad or Creative Rotation"
-
-TRAFFIC_START_ROW = 8
-TRAFFIC_LAST_COLUMN = 24
-
-
-# ---------------------------------------------------------------------------
-# BASIC HELPERS
-# ---------------------------------------------------------------------------
-
-def _clean(value) -> str:
-    return "" if value is None else str(value).strip()
+from aaa import (
+    creative_version_key,
+    generate_aaa_tsheet,
+    preview_aaa_setup,
+    validate_multi_rotation,
+)
+from anthem import (
+    generate_anthem_tsheet,
+    preview_anthem_setup,
+)
+from brooks import (
+    generate_brooks_tsheet,
+    preview_brooks_setup,
+)
+from pulte_normal import generate_normal_pulte_tsheet
+from pulte_vip import generate_pulte_tsheet
+from simon_vip import (
+    generate_simon_vip_tsheet,
+    preview_simon_vip_setup,
+)
 
 
-def _normalize(value) -> str:
-    return re.sub(r"[^a-z0-9]+", "", _clean(value).lower())
+ACCOUNT_NAMES = [
+    "Naming Convention Generator",
+    "Pulte",
+    "Pulte VIP",
+    "AAA",
+    "Simon VIP",
+    "Anthem / Elevance",
+    "Brooks",
+    "UPS Store",
+    "Hyatt",
+    "USTA",
+    "HMH",
+    "ConEd",
+    "Ascensus",
+    "Simon",
+    "Tillamook",
+    "Fossil",
+    "Lenovo",
+    "Thrivent",
+    "Vivid Seats",
+    "Ace Hardware",
+    "Arby's",
+    "Bank OZK",
+    "Best Friends",
+    "Famous Footwear",
+    "Tradex",
+    "ASI",
+    "IMC",
+]
 
 
-def _split_placement(value: str) -> list[str]:
-    return [_clean(part) for part in _clean(value).split("_")]
+# ============================================================
+# TRACKING CONFIGURATION
+# ============================================================
+
+TRACKING_FILE = "dashboard_tracking.csv"
+
+TRACKING_FIELDS = [
+    "timestamp",
+    "account",
+    "action",
+    "output_file",
+    "ads_processed",
+    "direct_count",
+    "multi_count",
+    "unmatched_count",
+    "creative_count",
+    "warning_count",
+    "estimated_minutes_saved",
+]
 
 
-def _read_uploaded_bytes(uploaded_file) -> bytes:
-    uploaded_file.seek(0)
-    return uploaded_file.read()
+def log_dashboard_usage(
+    account,
+    action,
+    output_file="",
+    ads_processed=0,
+    direct_count=0,
+    multi_count=0,
+    unmatched_count=0,
+    creative_count=0,
+    warning_count=0,
+    estimated_minutes_saved=0,
+):
+    """
+    Append one successful generation event to dashboard_tracking.csv.
+
+    IMPORTANT:
+    Streamlit Community Cloud local files may be reset after app
+    restarts/redeployments. This is good for testing the tracking UI.
+    For permanent organization-wide tracking, later connect this
+    function to SharePoint, Google Sheets, or a database.
+    """
+    row = {
+        "timestamp": datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "account": account,
+        "action": action,
+        "output_file": output_file,
+        "ads_processed": int(ads_processed or 0),
+        "direct_count": int(direct_count or 0),
+        "multi_count": int(multi_count or 0),
+        "unmatched_count": int(unmatched_count or 0),
+        "creative_count": int(creative_count or 0),
+        "warning_count": int(warning_count or 0),
+        "estimated_minutes_saved": int(
+            estimated_minutes_saved or 0
+        ),
+    }
+
+    file_exists = os.path.exists(TRACKING_FILE)
+
+    with open(
+        TRACKING_FILE,
+        "a",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=TRACKING_FIELDS,
+        )
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(row)
 
 
-def _decode_csv(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
-
-
-def _find_traffic_header_row(sheet) -> int:
-    for row_number in range(1, min(sheet.max_row, 30) + 1):
-        values = {
-            _normalize(sheet.cell(row=row_number, column=column).value)
-            for column in range(1, min(sheet.max_column, 40) + 1)
-        }
-        if "adname" in values and "creativefilename" in values:
-            return row_number
-    return TRAFFIC_START_ROW - 1
-
-
-def _traffic_data_start_row(sheet) -> int:
-    return _find_traffic_header_row(sheet) + 1
-
-
-# ---------------------------------------------------------------------------
-# PRISMA
-# ---------------------------------------------------------------------------
-
-def read_prisma_csv(uploaded_file) -> tuple[list[list[str]], list[dict[str, str]]]:
-    raw_text = _decode_csv(_read_uploaded_bytes(uploaded_file))
+def load_tracking_rows():
+    if not os.path.exists(TRACKING_FILE):
+        return []
 
     try:
-        dialect = csv.Sniffer().sniff(raw_text[:10000], delimiters=",;\t|")
-        reader = csv.reader(io.StringIO(raw_text), dialect)
-    except csv.Error:
-        reader = csv.reader(io.StringIO(raw_text))
+        with open(
+            TRACKING_FILE,
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            return list(csv.DictReader(file))
 
-    raw_rows = list(reader)
-
-    header_index = None
-    headers = None
-
-    for index, row in enumerate(raw_rows):
-        cleaned = [_clean(cell).replace("\n", " ") for cell in row]
-        normalized = {_normalize(cell): cell for cell in cleaned if cell}
-        if "placementname" in normalized:
-            header_index = index
-            headers = cleaned
-            break
-
-    if header_index is None or headers is None:
-        raise ValueError(
-            "The Prisma header row could not be found. "
-            "A Placement Name column is required."
-        )
-
-    records: list[dict[str, str]] = []
-
-    for raw_index in range(header_index + 1, len(raw_rows)):
-        row = raw_rows[raw_index]
-        padded = row + [""] * max(0, len(headers) - len(row))
-        record = dict(zip(headers, padded[:len(headers)]))
-
-        placement_name = ""
-        for key, value in record.items():
-            if _normalize(key) == "placementname":
-                placement_name = _clean(value)
-                break
-
-        if not placement_name:
-            continue
-
-        row_type = ""
-        for candidate in ("Row Type", "Type", "Package / Placement"):
-            for key, value in record.items():
-                if _normalize(key) == _normalize(candidate):
-                    row_type = _clean(value).lower()
-                    break
-
-        if row_type == "package" or placement_name.lower().startswith("package:"):
-            continue
-
-        record["Placement Name"] = placement_name
-        record["_source_excel_row"] = str(raw_index + 1)
-        records.append(record)
-
-    if not records:
-        raise ValueError(
-            "The Placement Name header was found, but no placement rows "
-            "were detected below it."
-        )
-
-    return raw_rows, records
-
-
-def _record_value(record: dict[str, str], *names: str) -> str:
-    normalized = {_normalize(k): v for k, v in record.items()}
-    for name in names:
-        value = normalized.get(_normalize(name))
-        if value is not None:
-            return _clean(value)
-    return ""
-
-
-def clear_old_template_data(workbook) -> None:
-    if PRISMA_SHEET in workbook.sheetnames:
-        sheet = workbook[PRISMA_SHEET]
-        for row in sheet.iter_rows(
-            min_row=1,
-            max_row=max(sheet.max_row, 1),
-            min_col=1,
-            max_col=max(sheet.max_column, 57),
-        ):
-            for cell in row:
-                cell.value = None
-
-    if TRAFFIC_SHEET in workbook.sheetnames:
-        sheet = workbook[TRAFFIC_SHEET]
-        first_data_row = _traffic_data_start_row(sheet)
-
-        for row in sheet.iter_rows(
-            min_row=first_data_row,
-            max_row=max(sheet.max_row, first_data_row),
-            min_col=1,
-            max_col=max(sheet.max_column, 40),
-        ):
-            for cell in row:
-                cell.value = None
-
-        for coordinate in ("B1", "B2", "B4", "B5"):
-            sheet[coordinate] = None
-
-    if ROTATION_SHEET in workbook.sheetnames:
-        sheet = workbook[ROTATION_SHEET]
-        for row in sheet.iter_rows(
-            min_row=2,
-            max_row=max(sheet.max_row, 2),
-            min_col=1,
-            max_col=max(sheet.max_column, 10),
-        ):
-            for cell in row:
-                cell.value = None
-
-    for sheet_name in ("Native - DV360", "Native - TTD", "Native - Oath"):
-        if sheet_name in workbook.sheetnames:
-            sheet = workbook[sheet_name]
-            for row in sheet.iter_rows(
-                min_row=2,
-                max_row=max(sheet.max_row, 2),
-                min_col=1,
-                max_col=max(sheet.max_column, 1),
-            ):
-                for cell in row:
-                    cell.value = None
-
-
-def paste_prisma_export(workbook, raw_rows: list[list[str]]) -> None:
-    if PRISMA_SHEET not in workbook.sheetnames:
-        raise KeyError(f"Missing worksheet: {PRISMA_SHEET}")
-
-    sheet = workbook[PRISMA_SHEET]
-
-    for row_index, row_values in enumerate(raw_rows, start=1):
-        for column_index, value in enumerate(row_values, start=1):
-            sheet.cell(row=row_index, column=column_index, value=value)
-
-
-# ---------------------------------------------------------------------------
-# PULTE TRACKING WORKBOOK
-# ---------------------------------------------------------------------------
-
-@lru_cache(maxsize=1)
-def _load_tracking_data() -> dict:
-    """
-    Reads the official Pulte tracking workbook at runtime.
-
-    Nothing important is hardcoded here:
-      - Medium
-      - Source
-      - Division
-      - Region
-      - Content
-      - Campaign
-      - Vendor
-      - Image
-      - SEM Region Mapping Tab
-
-    If Pulte updates the tracking workbook in GitHub, this script will use
-    those updated mappings after the Streamlit app restarts.
-    """
-    if not TRACKING_CODES_FILE.exists():
-        raise FileNotFoundError(
-            f"Tracking code workbook not found: {TRACKING_CODES_FILE.name}"
-        )
-
-    workbook = load_workbook(
-        TRACKING_CODES_FILE,
-        read_only=True,
-        data_only=True,
-    )
-
-    values_sheet_name = "ChannelTrackingValues"
-    region_sheet_name = "SEM Region Mapping Tab"
-
-    if values_sheet_name not in workbook.sheetnames:
-        raise KeyError(
-            f"Missing worksheet in tracking workbook: {values_sheet_name}"
-        )
-
-    values_sheet = workbook[values_sheet_name]
-
-    sections = {
-        "Medium": (1, 2),
-        "Source": (3, 4),
-        "Division": (5, 6),
-        "Region": (7, 8),
-        "Content": (9, 10),
-        "Campaign": (11, 12),
-        "Vendor": (13, 14),
-        "Image": (15, 16),
-    }
-
-    lookup: dict[str, dict[str, str]] = {}
-    reverse: dict[str, dict[str, str]] = {}
-
-    for section, (category_col, abbreviation_col) in sections.items():
-        lookup[section] = {}
-        reverse[section] = {}
-
-        for row in range(4, values_sheet.max_row + 1):
-            category = _clean(values_sheet.cell(row=row, column=category_col).value)
-            abbreviation = _clean(
-                values_sheet.cell(row=row, column=abbreviation_col).value
-            )
-
-            if not category or not abbreviation:
-                continue
-
-            lookup[section][_normalize(category)] = abbreviation
-            reverse[section][_normalize(abbreviation)] = category
-
-    # Build region mapping from the official SEM mapping tab.
-    region_rows: list[dict[str, str]] = []
-
-    if region_sheet_name in workbook.sheetnames:
-        region_sheet = workbook[region_sheet_name]
-
-        # Row 2 contains:
-        # Category | Abbreviation | SEM DMA | Division
-        for row in range(3, region_sheet.max_row + 1):
-            category = _clean(region_sheet.cell(row=row, column=1).value)
-            abbreviation = _clean(region_sheet.cell(row=row, column=2).value)
-            sem_dma = _clean(region_sheet.cell(row=row, column=3).value)
-            division = _clean(region_sheet.cell(row=row, column=4).value)
-
-            if not category:
-                continue
-
-            region_rows.append(
-                {
-                    "category": category,
-                    "abbreviation": abbreviation,
-                    "sem_dma": sem_dma,
-                    "division": division,
-                }
-            )
-
-    return {
-        "lookup": lookup,
-        "reverse": reverse,
-        "region_rows": region_rows,
-    }
-
-
-def _lookup_code(
-    tracking: dict,
-    section: str,
-    value: str,
-    default: str = "",
-) -> str:
-    if not value:
-        return default
-
-    normalized = _normalize(value)
-    section_lookup = tracking["lookup"].get(section, {})
-
-    # Direct category lookup.
-    if normalized in section_lookup:
-        return section_lookup[normalized]
-
-    # Also accept an abbreviation passed in by placement taxonomy.
-    reverse_section = tracking["reverse"].get(section, {})
-    if normalized in reverse_section:
-        category = reverse_section[normalized]
-        return section_lookup.get(_normalize(category), default)
-
-    return default
-
-
-def _match_tracking_category(
-    text: str,
-    tracking: dict,
-    section: str,
-) -> str:
-    """
-    Finds the best official category appearing in free-form placement text.
-    Longest normalized match wins to avoid 'Florida' beating
-    'Southwest Florida', etc.
-    """
-    normalized_text = _normalize(text)
-    candidates = []
-
-    for normalized_category in tracking["lookup"].get(section, {}):
-        if not normalized_category or normalized_category == "choosevalue":
-            continue
-        if normalized_category in normalized_text:
-            candidates.append(normalized_category)
-
-    if not candidates:
-        return ""
-
-    winner = max(candidates, key=len)
-
-    # Convert normalized category back to original category text.
-    for code_norm, category in tracking["reverse"].get(section, {}).items():
-        if _normalize(category) == winner:
-            return category
-
-    # Fallback: return normalized key; _lookup_code can still resolve it.
-    return winner
-
-
-# ---------------------------------------------------------------------------
-# PLACEMENT PARSING
-# ---------------------------------------------------------------------------
-
-def _find_dimension(text: str) -> str:
-    match = re.search(
-        r"(?<!\d)(\d{1,4})\s*[xX]\s*(\d{1,4})(?!\d)",
-        _clean(text),
-    )
-    return f"{match.group(1)}x{match.group(2)}" if match else ""
-
-
-def _brand_from_placement(placement_name: str) -> str:
-    normalized = _normalize(placement_name)
-
-    if "delwebb" in normalized:
-        return "Del Webb"
-    if "centex" in normalized:
-        return "Centex"
-    if "divosta" in normalized:
-        return "DiVosta"
-    if "johnwieland" in normalized or "wieland" in normalized:
-        return "Wieland"
-    if "americanwest" in normalized:
-        return "American West"
-
-    return "Pulte"
-
-
-def _community_id(placement_name: str) -> str:
-    # Prefer IDs near the right side of the placement name.
-    for part in reversed(_split_placement(placement_name)):
-        match = re.search(r"(?<!\d)(\d{5,7})(?!\d)", part)
-        if match:
-            return match.group(1)
-
-    return ""
-
-
-def _source_from_placement(
-    placement_name: str,
-    supplier_name: str,
-    tracking: dict,
-) -> str:
-    combined = f"{placement_name} {supplier_name}"
-
-    # First use exact/known source aliases.
-    aliases = [
-        ("new home source", "newhomesource.com"),
-        ("newhomesource", "newhomesource.com"),
-        ("zillow", "zillow.com"),
-        ("realtor", "realtor"),
-        ("youtube", "youtube.com"),
-        ("pinterest", "pinterest.com"),
-        ("instagram", "instagram.com"),
-        ("facebook", "facebook.com"),
-        ("teads", "teads"),
-        ("spotx", "SpotX"),
-        ("hulu", "hulu"),
-        ("programmatic", "programmatic"),
-        ("google", "google.com"),
-        ("bing", "bing.com"),
-    ]
-
-    combined_lower = combined.lower()
-    for needle, category in aliases:
-        if needle in combined_lower:
-            return category
-
-    # Then try any official Source value directly.
-    detected = _match_tracking_category(combined, tracking, "Source")
-    if detected:
-        return detected
-
-    # Supplier is only accepted if it is itself an official tracking source.
-    supplier_code = _lookup_code(tracking, "Source", supplier_name)
-    if supplier_code:
-        return supplier_name
-
-    return ""
-
-
-def _medium_from_placement(
-    placement_name: str,
-    source: str,
-    tracking: dict,
-) -> str:
-    detected = _match_tracking_category(placement_name, tracking, "Medium")
-    if detected:
-        return detected
-
-    normalized = _normalize(placement_name)
-
-    # Placement-taxonomy aliases.
-    if "programmatic" in normalized:
-        return "Programmatic"
-    if "display" in normalized:
-        return "Display"
-    if "video" in normalized or "olv" in normalized:
-        return "Video"
-    if "socialpaid" in normalized or "paidsocial" in normalized:
-        return "Social Paid"
-
-    # Endemic sources such as Realtor/Zillow/NHS commonly use Endemic.
-    if _normalize(source) in {
-        "realtor",
-        "zillowcom",
-        "newhomesourcecom",
-    }:
-        return "Endemic"
-
-    return ""
-
-
-def _site_name(source: str, supplier_name: str) -> str:
-    normalized = _normalize(source)
-
-    names = {
-        "zillowcom": "Zillow.com",
-        "realtor": "Realtor",
-        "newhomesourcecom": "NewHomeSource.com",
-        "teads": "Teads",
-        "youtubecom": "YouTube",
-        "hulu": "Hulu",
-        "programmatic": "Programmatic",
-    }
-
-    return names.get(normalized, _clean(supplier_name) or source)
-
-
-def _division_from_placement(
-    placement_name: str,
-    tracking: dict,
-) -> tuple[str, str]:
-    """
-    Returns:
-        (tracking_division, business_division)
-
-    Some Pulte business divisions map to a different official CMP Division.
-
-    Official hierarchy examples:
-        Tennessee -> Nashville -> NAS-_-
-        St. Louis -> Illinois-St. Louis -> ILS-_-
-        Southern Nevada -> Las Vegas -> LSV-_-
-        Indianapolis-Kentucky -> Indianapolis-Louisville -> INK-_-
-        Mid Atlantic -> Mid-Atlantic -> MAT-_-
-        Central Texas -> Austin -> AUS-_-
-    """
-    normalized = _normalize(placement_name)
-
-    hierarchy_aliases = {
-        "indianapoliskentucky": ("Indianapolis-Louisville", "Indianapolis-Kentucky"),
-        "indianapolislouisville": ("Indianapolis-Louisville", "Indianapolis-Kentucky"),
-        "illinoisstlouis": ("Illinois-St. Louis", "St. Louis"),
-        "centraltexas": ("Austin", "Central Texas"),
-        "southernnevada": ("Las Vegas", "Southern Nevada"),
-        "tennessee": ("Nashville", "Tennessee"),
-        "stlouis": ("Illinois-St. Louis", "St. Louis"),
-        "midatlantic": ("Mid-Atlantic", "Mid Atlantic"),
-        "southwestflorida": ("Southwest Florida", "Southwest Florida"),
-        "southeastflorida": ("Southeast Florida", "Southeast Florida"),
-        "southerncalifornia": ("Southern California", "Southern California"),
-        "northerncalifornia": ("Northern California", "Northern California"),
-        "pacificnorthwest": ("Pacific Northwest", "Pacific Northwest"),
-        "northeastcorridor": ("Northeast Corridor", "Northeast Corridor"),
-        "northeastflorida": ("Northeast Florida", "Northeast Florida"),
-        "coastalcarolinas": ("Coastal Carolinas", "Coastal Carolinas"),
-        "eastcarolina": ("East Carolina", "East Carolina"),
-        "westflorida": ("West Florida", "West Florida"),
-        "northflorida": ("North Florida", "North Florida"),
-        "newengland": ("New England", "New England"),
-        "newmexico": ("New Mexico", "New Mexico"),
-        "sanantonio": ("San Antonio", "San Antonio"),
-        "arizona": ("Arizona", "Arizona"),
-        "charlotte": ("Charlotte", "Charlotte"),
-        "cleveland": ("Cleveland", "Cleveland"),
-        "columbus": ("Columbus", "Columbus"),
-        "dallas": ("Dallas", "Dallas"),
-        "georgia": ("Georgia", "Georgia"),
-        "houston": ("Houston", "Houston"),
-        "michigan": ("Michigan", "Michigan"),
-        "minnesota": ("Minnesota", "Minnesota"),
-        "raleigh": ("Raleigh", "Raleigh"),
-        "utah": ("Utah", "Utah"),
-        "national": ("National", "National"),
-    }
-
-    for alias, (tracking_division, business_division) in sorted(
-        hierarchy_aliases.items(),
-        key=lambda item: len(item[0]),
-        reverse=True,
-    ):
-        if alias in normalized and _lookup_code(
-            tracking,
-            "Division",
-            tracking_division,
-        ):
-            return tracking_division, business_division
-
-    detected = _match_tracking_category(placement_name, tracking, "Division")
-    if detected:
-        return detected, detected
-
-    return "", ""
-
-
-def _sem_division_candidates(
-    tracking_division: str,
-    business_division: str,
-) -> set[str]:
-    candidates = {
-        _normalize(tracking_division),
-        _normalize(business_division),
-    }
-
-    reverse_hierarchy = {
-        "nashville": "Tennessee",
-        "illinoisstlouis": "St. Louis",
-        "lasvegas": "Southern Nevada",
-        "indianapolislouisville": "Indianapolis-Kentucky",
-        "midatlantic": "Mid Atlantic",
-        "austin": "Central Texas",
-    }
-
-    mapped = reverse_hierarchy.get(_normalize(tracking_division))
-    if mapped:
-        candidates.add(_normalize(mapped))
-
-    return {value for value in candidates if value}
-
-def _region_alias_matches(
-    text: str,
-    region_row: dict[str, str],
-    business_division: str = "",
-) -> bool:
-    """
-    Match only REGION-SPECIFIC evidence.
-
-    Broad division labels must not be allowed to select a region.
-    Example: SEM DMA='Southwest Florida' on the Sarasota row must not
-    cause every Southwest Florida placement to map to SAR.
-    """
-    normalized_text = _normalize(text)
-
-    category = _normalize(region_row["category"])
-    sem_dma_raw = _clean(region_row["sem_dma"])
-    sem_dma = _normalize(sem_dma_raw)
-    abbreviation = _normalize(region_row["abbreviation"])
-    division_norm = _normalize(region_row["division"])
-    business_division_norm = _normalize(business_division)
-
-    abbreviation_short = _normalize(
-        region_row["abbreviation"].split("-")[0]
-    )
-
-    candidates: set[str] = set()
-
-    if category and category != "choosevalue":
-        candidates.add(category)
-
-    if abbreviation:
-        candidates.add(abbreviation)
-
-    if abbreviation_short and len(abbreviation_short) >= 2:
-        candidates.add(abbreviation_short)
-
-    # Exclude broad DMA/division labels from acting as region evidence.
-    broad_labels = {
-        division_norm,
-        business_division_norm,
-        "southwestflorida",
-        "southeastflorida",
-        "southerncalifornia",
-        "northerncalifornia",
-        "coastalcarolinas",
-        "eastcarolina",
-        "newengland",
-        "midatlantic",
-        "centraltexas",
-        "tennessee",
-        "stlouis",
-    }
-
-    if sem_dma and sem_dma not in broad_labels:
-        candidates.add(sem_dma)
-
-    stop_words = {
-        "fl", "az", "tx", "ca", "nc", "sc", "ga", "mo", "md", "va",
-        "ma", "nh", "ri", "ct", "nm", "wa", "mn", "oh", "mi", "ky",
-        "in", "ny", "pa",
-        "southwest", "southeast", "southern", "northern", "north",
-        "south", "east", "west", "central", "florida", "carolina",
-        "california", "texas", "tennessee",
-    }
-
-    for word in re.findall(r"[A-Za-z]+", sem_dma_raw.lower()):
-        if len(word) >= 4 and word not in stop_words:
-            candidates.add(_normalize(word))
-
-    return any(
-        candidate and candidate in normalized_text
-        for candidate in candidates
-    )
-
-def _region_from_placement(
-    placement_name: str,
-    tracking_division: str,
-    business_division: str,
-    tracking: dict,
-) -> tuple[str, str]:
-    """
-    Resolve Region safely.
-
-    Examples:
-      Tennessee -> Nashville -> NASH-_-
-      Arizona + Phoenix/PHX -> PHX-_-
-      Arizona + Tucson/TUC -> TUC-_-
-      Southwest Florida + Fort Myers/Alva/Naples -> FMNA-_-
-      Southwest Florida + Sarasota -> SAR-_-
-
-    If a division has multiple valid regions and the placement has no
-    region-specific clue, do not guess.
-    """
-    rows = tracking["region_rows"]
-    placement_norm = _normalize(placement_name)
-
-    sem_divisions = _sem_division_candidates(
-        tracking_division,
-        business_division,
-    )
-
-    division_rows = [
-        row for row in rows
-        if _normalize(row["division"]) in sem_divisions
-    ]
-
-    # 1. Specific region evidence inside the allowed division.
-    scoped_matches = [
-        row for row in division_rows
-        if _region_alias_matches(
-            placement_name,
-            row,
-            business_division=business_division,
-        )
-    ]
-
-    if scoped_matches:
-        winner = max(
-            scoped_matches,
-            key=lambda row: max(
-                len(_normalize(row["category"])),
-                len(_normalize(row["sem_dma"])),
-                len(_normalize(row["abbreviation"])),
-            ),
-        )
-        return winner["category"], ""
-
-    # 2. Common locality aliases from placement/community naming.
-    locality_aliases = {
-        # Southwest Florida
-        ("Southwest Florida", "fortmyers"): "fort myers-naples",
-        ("Southwest Florida", "ftmyers"): "fort myers-naples",
-        ("Southwest Florida", "alva"): "fort myers-naples",
-        ("Southwest Florida", "naples"): "fort myers-naples",
-        ("Southwest Florida", "sarasota"): "sarasota",
-
-        # Arizona
-        ("Arizona", "phoenix"): "phoenix",
-        ("Arizona", "phx"): "phoenix",
-        ("Arizona", "tucson"): "tucson",
-        ("Arizona", "tuc"): "tucson",
-
-        # Coastal Carolinas
-        ("Coastal Carolinas", "charleston"): "charleston",
-        ("Coastal Carolinas", "savannah"): "savannah",
-
-        # East Carolina
-        ("East Carolina", "myrtlebeach"): "myrtle beach",
-        ("East Carolina", "wilmington"): "wilmington",
-        ("East Carolina", "wlm"): "wilmington",
-
-        # Mid Atlantic
-        ("Mid Atlantic", "baltimore"): "baltimore",
-        ("Mid Atlantic", "washingtondc"): "dc metro",
-        ("Mid Atlantic", "dcmetro"): "dc metro",
-        ("Mid Atlantic", "marylandbeaches"): "maryland beaches",
-        ("Mid Atlantic", "norfolk"): "northfolk-portsmout-newsport",
-        ("Mid Atlantic", "richmond"): "richmond",
-
-        # New England
-        ("New England", "boston"): "greater boston area",
-        ("New England", "providence"): "greater boston area",
-        ("New England", "hartford"): "hartford-new haven",
-        ("New England", "newhaven"): "hartford-new haven",
-
-        # Northeast Corridor
-        ("Northeast Corridor", "newyork"): "New York",
-        ("Northeast Corridor", "philadelphia"): "philadelphia",
-
-        # Northern California
-        ("Northern California", "sanfrancisco"): "bay area",
-        ("Northern California", "oakland"): "bay area",
-        ("Northern California", "sanjose"): "bay area",
-        ("Northern California", "sacramento"): "sacramento",
-        ("Northern California", "fresno"): "central-valley",
-
-        # Southern California
-        ("Southern California", "losangeles"): "los angeles",
-        ("Southern California", "sandiego"): "southern california",
-
-        # Southeast Florida
-        ("Southeast Florida", "miami"): "Miami-Ft. Lauderdale",
-        ("Southeast Florida", "fortlauderdale"): "Miami-Ft. Lauderdale",
-        ("Southeast Florida", "palmbeach"): "palm beach",
-        ("Southeast Florida", "westpalmbeach"): "palm beach",
-    }
-
-    for (division_name, alias), region_name in sorted(
-        locality_aliases.items(),
-        key=lambda item: len(item[0][1]),
-        reverse=True,
-    ):
-        if (
-            _normalize(division_name) in sem_divisions
-            and alias in placement_norm
-        ):
-            if _lookup_code(tracking, "Region", region_name):
-                return region_name, ""
-
-    # 3. Exactly one official region for the business division -> safe default.
-    unique_categories: list[str] = []
-    seen = set()
-
-    for row in division_rows:
-        category = _clean(row["category"])
-        norm = _normalize(category)
-
-        if not category or norm == "choosevalue":
-            continue
-
-        if norm not in seen:
-            seen.add(norm)
-            unique_categories.append(category)
-
-    if len(unique_categories) == 1:
-        return unique_categories[0], ""
-
-    # 4. Known one-market hierarchy defaults.
-    explicit_defaults = {
-        "Tennessee": "nashville",
-        "St. Louis": "st.louis",
-        "Southern Nevada": "las-vegas",
-        "Raleigh": "raleigh",
-        "San Antonio": "san antonio",
-        "West Florida": "tampa",
-        "Charlotte": "charlotte",
-        "Dallas": "dallas",
-        "Georgia": "atlanta",
-        "Houston": "houston",
-        "Michigan": "detroit",
-        "Minnesota": "the twin cities",
-        "New Mexico": "albuquerque",
-        "Pacific Northwest": "seattle",
-    }
-
-    preferred = explicit_defaults.get(business_division)
-    if preferred and _lookup_code(tracking, "Region", preferred):
-        return preferred, ""
-
-    if not tracking_division:
-        return "", "Division could not be detected, so Region could not be resolved."
-
-    return (
-        "",
-        f"Region could not be resolved safely for division "
-        f"'{business_division or tracking_division}'. "
-        "This division has multiple possible regions and the placement "
-        "did not contain a specific DMA/city/region signal."
-    )
-
-def _campaign_from_placement(
-    placement_name: str,
-    tracking: dict,
-) -> str:
-    detected = _match_tracking_category(placement_name, tracking, "Campaign")
-    if detected:
-        return detected
-
-    aliases = {
-        "heavyup": "Heavy Up",
-        "qmi": "QMI",
-        "grandopening": "Grand Opening (inclusive of all openings)",
-        "promotion": "Promotion (inclusive of Incentives)",
-        "awareness": "Awareness",
-        "community": "Community",
-        "prospect": "Prospect",
-        "lead": "Lead",
-        "traffic": "Traffic",
-        "comingsoon": "Coming Soon",
-        "nurturing": "Nurturing",
-    }
-
-    normalized = _normalize(placement_name)
-    for token, official in sorted(
-        aliases.items(),
-        key=lambda item: len(item[0]),
-        reverse=True,
-    ):
-        if token in normalized and _lookup_code(tracking, "Campaign", official):
-            return official
-
-    return ""
-
-
-def _image_category(
-    placement_name: str,
-    creative_name: str,
-    tracking: dict,
-) -> str:
-    combined = f"{placement_name} {creative_name}"
-
-    # First detect full official Image category names.
-    detected = _match_tracking_category(combined, tracking, "Image")
-    if detected:
-        return detected
-
-    # Then common Pulte taxonomy abbreviations -> official Image categories.
-    aliases = {
-        "EXTD": "Exterior-Daylight",
-        "EXTT": "Exterior-Twilight",
-        "EXT": "Exterior",
-        "LIFE": "Lifestyle",
-        "AMN": "Amenity",
-        "OFPK": "Open Floor Plan- Kitchen",
-        "OFP": "Open Floor Plan",
-        "POOL": "Pool",
-        "FP": "Floor Plan",
-        "STOR": "Instagram Story",
-        "IFP": "Interactive Floor Plan",
-        "PPC": "Pulte Planning Center",
-        "SAM": "Site Availability Map",
-        "SLIDE": "Slideshow",
-        "SMHM": "Smart Home",
-        "VID": "Video",
-        "VIRT": "Virtual Reality",
-        "BYD": "Backyard",
-        "CAR": "Carousel",
-        "FLXR": "Flex Room",
-        "FYR": "Foyer",
-        "LOFT": "Loft",
-        "OBA": "Owners Bathroom",
-        "OBR": "Owners Bedroom",
-    }
-
-    upper = combined.upper()
-
-    for abbreviation, category in sorted(
-        aliases.items(),
-        key=lambda item: len(item[0]),
-        reverse=True,
-    ):
-        if re.search(
-            rf"(^|[^A-Z0-9]){re.escape(abbreviation)}([^A-Z0-9]|$)",
-            upper,
-        ):
-            if _lookup_code(tracking, "Image", category):
-                return category
-
-    return ""
-
-
-def _content_value(
-    placement_name: str,
-    brand: str,
-    community_id: str,
-    tracking: dict,
-) -> tuple[str, str]:
-    """
-    Returns (content_value, content_suffix).
-
-    Market-wide examples:
-      Pulte + Market Wide    -> Pulte Market Wide -> PULMKT
-      Centex + Market Wide   -> Centex Market Wide -> CENMKT
-      Del Webb + Market Wide -> Del Webb Market Wide -> DWMKT
-
-    Community-specific example:
-      Pulte + community 123456 -> PUL123456
-    """
-    normalized = _normalize(placement_name)
-    market_wide = "marketwide" in normalized or "mktw" in normalized
-
-    if market_wide:
-        market_value = {
-            "Pulte": "Pulte Market Wide",
-            "Centex": "Centex Market Wide",
-            "Del Webb": "Del Webb Market Wide",
-            "DiVosta": "Divosta Market Wide",
-            "Wieland": "Wieland Market Wide",
-            "American West": "American West Market Wide",
-        }.get(brand, f"{brand} Market Wide")
-
-        if _lookup_code(tracking, "Content", market_value):
-            return market_value, ""
-
-    return brand, community_id
-
-
-def parse_pulte_placement(
-    placement_name: str,
-    supplier_name: str = "",
-) -> tuple[dict[str, str], list[str]]:
-    tracking = _load_tracking_data()
-    warnings: list[str] = []
-
-    brand = _brand_from_placement(placement_name)
-    community_id = _community_id(placement_name)
-
-    division, business_division = _division_from_placement(
-        placement_name,
-        tracking,
-    )
-    if not division:
-        warnings.append("Division was not detected.")
-
-    source = _source_from_placement(
-        placement_name,
-        supplier_name,
-        tracking,
-    )
-    if not source:
-        warnings.append("Source was not detected.")
-
-    medium = _medium_from_placement(
-        placement_name,
-        source,
-        tracking,
-    )
-    if not medium:
-        warnings.append("Medium was not detected.")
-
-    region, region_warning = _region_from_placement(
-        placement_name,
-        division,
-        business_division,
-        tracking,
-    )
-    if region_warning:
-        warnings.append(region_warning)
-
-    campaign = _campaign_from_placement(
-        placement_name,
-        tracking,
-    )
-    if not campaign:
-        warnings.append("Campaign/purpose was not detected.")
-
-    # Keep the older Ad Name convention by extracting the values surrounding
-    # the Brand token where possible.
-    parts = _split_placement(placement_name)
-    brand_index = None
-    brand_aliases = {
-        "pulte", "delwebb", "centex", "divosta",
-        "wieland", "johnwieland", "americanwest",
-    }
-
-    for index, part in enumerate(parts):
-        if _normalize(part) in brand_aliases:
-            brand_index = index
-            break
-
-    positional_campaign = ""
-    community = ""
-
-    if brand_index is not None:
-        if brand_index + 1 < len(parts):
-            positional_campaign = parts[brand_index + 1]
-        if brand_index + 2 < len(parts):
-            community = parts[brand_index + 2]
-
-    return {
-        "placement_name": placement_name,
-        "source": source,
-        "site_name": _site_name(source, supplier_name),
-        "medium": medium,
-        "dimension": _find_dimension(placement_name),
-        "division": division,
-        "business_division": business_division,
-        "brand": brand,
-        "campaign": campaign,
-        "ad_campaign": positional_campaign or campaign,
-        "community": community,
-        "community_id": community_id,
-        "region": region,
-    }, warnings
-
-
-# ---------------------------------------------------------------------------
-# CREATIVE MATCHING
-# ---------------------------------------------------------------------------
-
-def _creative_names(creative_files: Iterable) -> list[str]:
-    return [
-        Path(uploaded_file.name).name
-        for uploaded_file in creative_files
-        if getattr(uploaded_file, "name", None)
-    ]
-
-
-def _creative_brand_matches(creative_name: str, brand: str) -> bool:
-    """
-    Match Pulte brand codes in creative filenames safely.
-
-    Supported examples:
-      SWFL_DW_...   -> Del Webb
-      SWFL_DWB_...  -> Del Webb
-      SWFL_PU_...   -> Pulte
-      SWFL_PUL_...  -> Pulte
-      ..._CTX_...   -> Centex
-      ..._CEN_...   -> Centex
-
-    Tokens are compared as filename tokens so short codes such as DW/PU
-    do not accidentally match unrelated text.
-    """
-    stem = Path(creative_name).stem
-    tokens = {
-        _normalize(token)
-        for token in re.split(r"[_\-\s]+", stem)
-        if _normalize(token)
-    }
-    normalized = _normalize(stem)
-
-    token_aliases = {
-        "Centex": {"ctx", "cen", "centex"},
-        "Del Webb": {"dw", "dwb", "delwebb"},
-        "Pulte": {"pu", "pul", "pulte"},
-        "DiVosta": {"div", "divosta"},
-        "Wieland": {"jw", "wieland", "johnwieland"},
-        "American West": {"aw", "americanwest"},
-    }
-
-    aliases = token_aliases.get(brand, set())
-
-    if tokens.intersection(aliases):
-        return True
-
-    # Full brand names can appear without separators.
-    full_aliases = {
-        "Centex": ("centex",),
-        "Del Webb": ("delwebb",),
-        "Pulte": ("pulte",),
-        "DiVosta": ("divosta",),
-        "Wieland": ("johnwieland", "wieland"),
-        "American West": ("americanwest",),
-    }
-
-    return any(alias in normalized for alias in full_aliases.get(brand, ()))
-
-
-def _creative_has_known_brand_marker(creative_name: str) -> bool:
-    stem = Path(creative_name).stem
-    tokens = {
-        _normalize(token)
-        for token in re.split(r"[_\-\s]+", stem)
-        if _normalize(token)
-    }
-    normalized = _normalize(stem)
-
-    short_markers = {
-        "ctx", "cen", "dw", "dwb", "pu", "pul",
-        "div", "jw", "aw",
-    }
-    full_markers = {
-        "centex", "delwebb", "pulte", "divosta",
-        "johnwieland", "wieland", "americanwest",
-    }
-
-    return bool(tokens.intersection(short_markers)) or any(
-        marker in normalized for marker in full_markers
-    )
-
-def _creative_score(
-    creative_name: str,
-    parsed: dict[str, str],
-) -> int:
-    score = 0
-    normalized_creative = _normalize(creative_name)
-
-    # Dimension is mandatory whenever placement has a dimension.
-    dimension = parsed["dimension"]
-    if dimension:
-        if _normalize(dimension) not in normalized_creative:
-            return -1000
-        score += 100
-
-    # Brand is mandatory when creative filename carries recognizable brand
-    # abbreviations. This prevents CTX from being selected for Del Webb.
-    known_brand_marker = _creative_has_known_brand_marker(creative_name)
-
-    if known_brand_marker:
-        if not _creative_brand_matches(creative_name, parsed["brand"]):
-            return -1000
-        score += 80
-
-    checks = (
-        (parsed["community_id"], 40),
-        (parsed["community"], 30),
-        (parsed["region"], 15),
-        (parsed["division"], 10),
-    )
-
-    for value, points in checks:
-        normalized_value = _normalize(value)
-        if normalized_value and normalized_value in normalized_creative:
-            score += points
-
-    return score
-
-
-def match_creative(
-    creative_names: list[str],
-    parsed: dict[str, str],
-) -> str:
-    if not creative_names:
-        return ""
-
-    ranked = sorted(
-        ((_creative_score(name, parsed), name) for name in creative_names),
-        key=lambda item: (item[0], item[1]),
-        reverse=True,
-    )
-
-    if not ranked or ranked[0][0] < 0:
-        return ""
-
-    # Do not silently choose between an exact tie.
-    if (
-        len(ranked) > 1
-        and ranked[0][0] == ranked[1][0]
-        and ranked[0][0] > 0
-    ):
-        return ""
-
-    return ranked[0][1] if ranked[0][0] > 0 else ""
-
-
-# ---------------------------------------------------------------------------
-# LANDING URL MATCHING
-# ---------------------------------------------------------------------------
-
-def _parse_url_lines(landing_urls_text: str) -> list[dict[str, str]]:
-    """
-    Supports:
-      URL
-      placement<TAB>URL
-      ad name<TAB>URL
-      community ID<TAB>URL
-      Centex<TAB>URL
-      Del Webb<TAB>URL
-
-    Never maps by row order.
-    """
-    parsed = []
-
-    for raw_line in landing_urls_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        match = re.search(r"https?://\S+", line)
-        if not match:
-            continue
-
-        url = match.group(0).rstrip(",;")
-        label = line[:match.start()].strip(" \t:-|")
-        parsed.append(
-            {
-                "line": line,
-                "label": label,
-                "url": url,
-            }
-        )
-
-    return parsed
-
-
-def match_landing_url(
-    url_rows: list[dict[str, str]],
-    parsed: dict[str, str],
-    ad_name: str,
-) -> str:
-    if not url_rows:
-        return ""
-
-    placement_norm = _normalize(parsed["placement_name"])
-    ad_norm = _normalize(ad_name)
-    community_id = parsed["community_id"]
-    brand_norm = _normalize(parsed["brand"])
-
-    scored = []
-
-    for item in url_rows:
-        label_norm = _normalize(item["label"])
-        line_norm = _normalize(item["line"])
-        url_norm = _normalize(item["url"])
-
-        score = 0
-
-        if placement_norm and placement_norm in line_norm:
-            score += 1000
-        if ad_norm and ad_norm in line_norm:
-            score += 900
-        if community_id and community_id in item["line"]:
-            score += 800
-        if brand_norm and brand_norm in label_norm:
-            score += 500
-
-        # Domain-brand checks.
-        if parsed["brand"] == "Del Webb" and "delwebbcom" in url_norm:
-            score += 300
-        elif parsed["brand"] in {"Pulte", "Centex"} and "pultecom" in url_norm:
-            score += 200
-
-        # Region/community hints.
-        if parsed["region"] and _normalize(parsed["region"]) in line_norm:
-            score += 100
-        if parsed["community"] and _normalize(parsed["community"]) in line_norm:
-            score += 100
-
-        scored.append((score, item["url"]))
-
-    scored.sort(reverse=True, key=lambda x: x[0])
-
-    if scored and scored[0][0] > 0:
-        if len(scored) > 1 and scored[0][0] == scored[1][0]:
-            return ""
-        return scored[0][1]
-
-    # One supplied URL may safely apply to all.
-    if len(url_rows) == 1:
-        return url_rows[0]["url"]
-
-    # Multiple URLs with no unique taxonomy match -> do not guess.
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# CMP CODE
-# ---------------------------------------------------------------------------
-
-def build_cmp_code(
-    parsed: dict[str, str],
-    image_category: str,
-) -> tuple[str, list[str]]:
-    tracking = _load_tracking_data()
-    warnings: list[str] = []
-
-    content_value, community_suffix = _content_value(
-        parsed["placement_name"],
-        parsed["brand"],
-        parsed["community_id"],
-        tracking,
-    )
-
-    components = [
-        ("Medium", parsed["medium"]),
-        ("Source", parsed["source"]),
-        ("Division", parsed["division"]),
-        ("Region", parsed["region"]),
-        ("Content", content_value),
-        ("Campaign", parsed["campaign"]),
-        ("Vendor", "Assembly"),
-        # 1x1/tracking placements may not carry an image taxonomy.
-        # In that case use the official workbook's Choose Value = NA-_-.
-        ("Image", image_category or "Choose Value"),
-    ]
-
-    codes: dict[str, str] = {}
-
-    for section, value in components:
-        code = _lookup_code(tracking, section, value)
-        if not code:
-            warnings.append(
-                f"{section} mapping not found for '{value or 'blank'}'."
-            )
-        codes[section] = code
-
-    if warnings:
-        return "", warnings
-
-    content_code = codes["Content"]
-
-    # Content codes in the workbook (e.g. PUL/CEN/DW) do not all carry -_-.
-    # Community IDs are appended immediately after the brand code.
-    if community_suffix:
-        content_code = f"{content_code}{community_suffix}"
-
-    # Add separator after Content exactly once.
-    if not content_code.endswith("-_-"):
-        content_code = f"{content_code}-_-"
-
-    cmp_code = "".join(
-        [
-            codes["Medium"],
-            codes["Source"],
-            codes["Division"],
-            codes["Region"],
-            content_code,
-            codes["Campaign"],
-            codes["Vendor"],
-            codes["Image"],
-        ]
-    )
-
-    return cmp_code, []
-
-
-def _append_cmp(url: str, cmp_code: str) -> str:
-    if not url or not cmp_code:
-        return ""
-
-    # Avoid double-appending CMP when a complete tracked URL is supplied.
-    if re.search(r"[?&]cmp=", url, flags=re.IGNORECASE):
-        return url
-
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}cmp={cmp_code}"
-
-
-# ---------------------------------------------------------------------------
-# TRAFFIC DOC
-# ---------------------------------------------------------------------------
-
-def _campaign_name_from_raw_rows(raw_rows: list[list[str]]) -> str:
-    for row in raw_rows:
-        if row and _clean(row[0]) == "Campaign name:":
-            return _clean(row[1]) if len(row) > 1 else ""
-    return ""
-
-
-def build_ad_name(parsed: dict[str, str]) -> str:
-    parts = [
-        parsed["division"],
-        parsed["brand"],
-        parsed["ad_campaign"],
-        parsed["community"],
-        parsed["dimension"],
-    ]
-    return "_".join(part for part in parts if part)
-
-
-def _copy_row_format(sheet, source_row: int, target_row: int) -> None:
-    if source_row == target_row:
-        return
-
-    for column in range(1, TRAFFIC_LAST_COLUMN + 1):
-        source = sheet.cell(row=source_row, column=column)
-        target = sheet.cell(row=target_row, column=column)
-
-        target._style = copy(source._style)
-        target.number_format = source.number_format
-        target.font = copy(source.font)
-        target.fill = copy(source.fill)
-        target.border = copy(source.border)
-        target.alignment = copy(source.alignment)
-        target.protection = copy(source.protection)
-
-    sheet.row_dimensions[target_row].height = (
-        sheet.row_dimensions[source_row].height
-    )
-
-
-def populate_traffic_sheet(
-    workbook,
-    raw_rows: list[list[str]],
-    records: list[dict[str, str]],
-    creative_files: Iterable,
-    landing_urls_text: str,
-) -> list[str]:
-    if TRAFFIC_SHEET not in workbook.sheetnames:
-        raise KeyError(f"Missing worksheet: {TRAFFIC_SHEET}")
-
-    sheet = workbook[TRAFFIC_SHEET]
-    creative_names = _creative_names(creative_files)
-    url_rows = _parse_url_lines(landing_urls_text)
-    warnings: list[str] = []
-
-    campaign_name = _campaign_name_from_raw_rows(raw_rows)
-    sheet["B1"] = campaign_name
-
-    first_data_row = _traffic_data_start_row(sheet)
-    template_row = first_data_row
-
-    for index, record in enumerate(records):
-        output_row = first_data_row + index
-        _copy_row_format(sheet, template_row, output_row)
-
-        placement_name = _record_value(record, "Placement Name")
-        supplier_name = (
-            _record_value(record, "Media outlet / Supplier name (ad server)")
-            or _record_value(record, "Media outlet / Supplier name (Prisma)")
-            or _record_value(record, "Media Outlet")
-            or _record_value(record, "Supplier")
-        )
-
-        parsed, parse_warnings = parse_pulte_placement(
-            placement_name,
-            supplier_name,
-        )
-
-        ad_name = build_ad_name(parsed)
-        creative_name = match_creative(creative_names, parsed)
-
-        image_category = _image_category(
-            placement_name,
-            creative_name,
-            _load_tracking_data(),
-        )
-
-        landing_url = match_landing_url(
-            url_rows,
-            parsed,
-            ad_name,
-        )
-
-        cmp_code, cmp_warnings = build_cmp_code(
-            parsed,
-            image_category,
-        )
-
-        final_url = _append_cmp(landing_url, cmp_code)
-
-        placement_id = (
-            _record_value(record, "Ad server ID")
-            or _record_value(record, "Placement ID")
-            or _record_value(record, "DCM Placement ID")
-        )
-
-        for warning in parse_warnings:
-            warnings.append(
-                f"{placement_id or 'No ID'} — {warning} "
-                f"Placement: {placement_name}"
-            )
-
-        for warning in cmp_warnings:
-            warnings.append(
-                f"{placement_id or 'No ID'} — {warning} "
-                f"Placement: {placement_name}"
-            )
-
-        if not creative_name:
-            warnings.append(
-                f"{placement_id or 'No ID'} — No unique creative matched: "
-                f"{placement_name}"
-            )
-
-        if not landing_url:
-            warnings.append(
-                f"{placement_id or 'No ID'} — No unique landing URL matched: "
-                f"{placement_name}"
-            )
-
-        # Existing Pulte VIP behavior: 1x1 trafficking dimensions in Traffic_Doc.
-        values = [
-            None,                                   # A
-            parsed["site_name"],                    # B Site Name
-            placement_id,                           # C Placement ID
-            placement_name,                         # D Placement Name
-            "1x1",                                  # E Dimensions
-            None,                                   # F Duration
-            None,                                   # G
-            ad_name,                                # H AD Name
-            None,                                   # I
-            "New",                                  # J Action
-            creative_name,                          # K Creative File Name
-            "Yes",                                  # L Studio Creative?
-            None,                                   # M Rotation
-            _record_value(record, "Flight start date"),  # N
-            _record_value(record, "Flight end date"),    # O
-            final_url,                              # P Click Through URL
-            None, None, None, None, None, None, None, None,
-        ]
-
-        for column, value in enumerate(values, start=1):
-            sheet.cell(row=output_row, column=column, value=value)
-
-    return warnings
-
-
-# ---------------------------------------------------------------------------
-# PUBLIC ENTRY POINT
-# ---------------------------------------------------------------------------
-
-def generate_pulte_tsheet(
-    prisma_file,
-    creative_files,
-    landing_urls_text: str,
-) -> tuple[bytes, list[str]]:
-    """
-    Drop-in replacement for the existing Pulte VIP module.
-
-    Key safeguards:
-      - Uses official Pulte tracking workbook mappings.
-      - Tennessee -> Nashville automatically through SEM Region Mapping.
-      - Other divisions use exact DMA/region tokens when multiple regions exist.
-      - Never maps URLs by row order.
-      - Never guesses when multiple URLs/regions are ambiguous.
-      - Brand + dimension aware creative matching.
-      - Market Wide content codes handled correctly.
-      - Existing function signature is unchanged, so Tsheet.py does not need
-        to be changed.
-    """
-    if not MASTER_TEMPLATE.exists():
-        raise FileNotFoundError(
-            f"Master template not found: {MASTER_TEMPLATE.name}"
-        )
-
-    # Fail early if tracking workbook is missing/broken.
-    _load_tracking_data()
-
-    raw_rows, records = read_prisma_csv(prisma_file)
-
-    workbook = load_workbook(
-        MASTER_TEMPLATE,
-        keep_vba=True,
-    )
-
-    clear_old_template_data(workbook)
-    paste_prisma_export(workbook, raw_rows)
-
-    warnings = populate_traffic_sheet(
-        workbook=workbook,
-        raw_rows=raw_rows,
-        records=records,
-        creative_files=creative_files,
-        landing_urls_text=landing_urls_text,
-    )
-
-    try:
-        workbook.calculation.fullCalcOnLoad = True
-        workbook.calculation.forceFullCalc = True
-        workbook.calculation.calcMode = "auto"
     except Exception:
-        pass
+        return []
 
-    output = io.BytesIO()
-    workbook.save(output)
-    output.seek(0)
 
-    return output.getvalue(), warnings
+def tracking_summary():
+    rows = load_tracking_rows()
+
+    successful_rows = [
+        row
+        for row in rows
+        if row.get("action")
+        in {
+            "T-Sheet Generated",
+            "Naming Generated",
+        }
+    ]
+
+    total_ads = sum(
+        int(float(row.get("ads_processed") or 0))
+        for row in successful_rows
+    )
+
+    total_minutes_saved = sum(
+        int(
+            float(
+                row.get(
+                    "estimated_minutes_saved"
+                )
+                or 0
+            )
+        )
+        for row in successful_rows
+    )
+
+    total_warnings = sum(
+        int(float(row.get("warning_count") or 0))
+        for row in successful_rows
+    )
+
+    return {
+        "rows": rows,
+        "generated_count": len(successful_rows),
+        "total_ads": total_ads,
+        "hours_saved": round(
+            total_minutes_saved / 60,
+            1,
+        ),
+        "total_warnings": total_warnings,
+    }
+
+
+# ============================================================
+# STREAMLIT PAGE
+# ============================================================
+
+st.set_page_config(
+    page_title="Traffic Sheet Generator",
+    page_icon="📄",
+    layout="wide",
+)
+
+# Header with Assembly logo
+header_left, header_right = st.columns([4, 1])
+
+with header_left:
+    st.title("Traffic Sheet Generator")
+    st.caption(
+        "Select an account and generate the required trafficking sheet."
+    )
+
+with header_right:
+    st.image(
+        "assembly_Logo.png",
+        width=220,
+    )
+
+
+# ============================================================
+# TRACKING DASHBOARD
+# ============================================================
+
+summary = tracking_summary()
+
+metric1, metric2, metric3, metric4 = st.columns(4)
+
+with metric1:
+    st.metric(
+        "Sheets Generated",
+        f"{summary['generated_count']:,}",
+    )
+
+with metric2:
+    st.metric(
+        "Ads / Placements Processed",
+        f"{summary['total_ads']:,}",
+    )
+
+with metric3:
+    st.metric(
+        "Estimated Hours Saved",
+        f"{summary['hours_saved']:,.1f}",
+    )
+
+with metric4:
+    st.metric(
+        "Warnings Logged",
+        f"{summary['total_warnings']:,}",
+    )
+
+with st.expander(
+    "Usage Tracking",
+    expanded=False,
+):
+    tracking_rows = summary["rows"]
+
+    if tracking_rows:
+        st.dataframe(
+            list(reversed(tracking_rows)),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        try:
+            with open(
+                TRACKING_FILE,
+                "rb",
+            ) as tracking_file:
+                tracking_bytes = (
+                    tracking_file.read()
+                )
+
+            st.download_button(
+                "Download Tracking CSV",
+                data=tracking_bytes,
+                file_name=(
+                    "dashboard_tracking.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        except Exception:
+            pass
+
+    else:
+        st.info(
+            "No successful generations have "
+            "been tracked yet."
+        )
+
+
+selected_account = st.selectbox(
+    "Select Account",
+    ACCOUNT_NAMES,
+    index=0,
+)
+
+
+def common_upload_fields(
+    key_prefix: str,
+    allow_zip: bool = False,
+):
+    prisma = st.file_uploader(
+        "Upload Prisma CSV",
+        type=["csv", "txt"],
+        key=f"{key_prefix}_prisma",
+    )
+
+    creative_types = [
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "webp",
+        "html",
+        "htm",
+        "mp4",
+    ]
+
+    if allow_zip:
+        creative_types.append("zip")
+
+    creatives = st.file_uploader(
+        "Upload Creative Files",
+        type=creative_types,
+        accept_multiple_files=True,
+        key=f"{key_prefix}_creatives",
+    )
+
+    return prisma, creatives
+
+
+# ============================================================
+# PULTE
+# ============================================================
+
+if selected_account == "Pulte":
+    st.success(
+        "Normal Pulte automation is ready."
+    )
+
+    st.info(
+        "Paste the complete URLs/UTMs exactly as "
+        "provided by the team. The dashboard will "
+        "not create or modify the UTM."
+    )
+
+    prisma_file, creative_files = (
+        common_upload_fields("pulte")
+    )
+
+    complete_urls_text = st.text_area(
+        "Paste Complete URLs / UTMs",
+        placeholder=(
+            "Paste one complete URL per line"
+        ),
+        height=160,
+        key="pulte_urls",
+    )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Pulte_Tsheet.xlsm",
+        key="pulte_output",
+    )
+
+    if not output_name.lower().endswith(
+        ".xlsm"
+    ):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Pulte T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error(
+                "Please upload the Prisma CSV."
+            )
+
+        elif not creative_files:
+            st.error(
+                "Please upload at least one "
+                "creative file."
+            )
+
+        elif not complete_urls_text.strip():
+            st.error(
+                "Please paste the complete "
+                "URLs/UTMs."
+            )
+
+        else:
+            try:
+                with st.spinner(
+                    "Generating the normal "
+                    "Pulte T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_normal_pulte_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            complete_urls_text=(
+                                complete_urls_text
+                            ),
+                        )
+                    )
+
+                ads_processed = 0
+
+                log_dashboard_usage(
+                    account="Pulte",
+                    action=(
+                        "T-Sheet Generated"
+                    ),
+                    output_file=output_name,
+                    ads_processed=(
+                        ads_processed
+                    ),
+                    creative_count=len(
+                        creative_files
+                    ),
+                    warning_count=len(
+                        warnings
+                    ),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success(
+                    "Pulte T-Sheet generated "
+                    "successfully."
+                )
+
+                st.caption(
+                    "Tracking recorded: "
+                    f"{ads_processed:,} Ads "
+                    "processed."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "Review matching and "
+                        "dimension warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(
+                                warning
+                            )
+
+                st.download_button(
+                    "Download Pulte T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# PULTE VIP
+# ============================================================
+
+elif selected_account == "Pulte VIP":
+    st.success(
+        "Pulte VIP automation is ready."
+    )
+
+    prisma_file, creative_files = (
+        common_upload_fields(
+            "pulte_vip"
+        )
+    )
+
+    landing_urls_text = st.text_area(
+        "Paste Landing URLs",
+        placeholder=(
+            "Paste one landing URL per line"
+        ),
+        height=160,
+        key="pulte_vip_urls",
+    )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Pulte_VIP_Tsheet.xlsm",
+        key="pulte_vip_output",
+    )
+
+    if not output_name.lower().endswith(
+        ".xlsm"
+    ):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Pulte VIP T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error(
+                "Please upload the Prisma CSV."
+            )
+
+        elif not creative_files:
+            st.error(
+                "Please upload at least one "
+                "creative file."
+            )
+
+        elif not landing_urls_text.strip():
+            st.error(
+                "Please paste at least one "
+                "landing URL."
+            )
+
+        else:
+            try:
+                with st.spinner(
+                    "Generating the Pulte VIP "
+                    "T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_pulte_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            landing_urls_text=(
+                                landing_urls_text
+                            ),
+                        )
+                    )
+
+                ads_processed = 0
+
+                log_dashboard_usage(
+                    account="Pulte VIP",
+                    action=(
+                        "T-Sheet Generated"
+                    ),
+                    output_file=output_name,
+                    ads_processed=(
+                        ads_processed
+                    ),
+                    creative_count=len(
+                        creative_files
+                    ),
+                    warning_count=len(
+                        warnings
+                    ),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success(
+                    "Pulte VIP T-Sheet generated "
+                    "successfully."
+                )
+
+                st.caption(
+                    "Tracking recorded: "
+                    f"{ads_processed:,} Ads "
+                    "processed."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "Review warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(
+                                warning
+                            )
+
+                st.download_button(
+                    "Download Pulte VIP T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# AAA
+# ============================================================
+
+elif selected_account == "AAA":
+    st.success(
+        "AAA automation is ready."
+    )
+
+    st.info(
+        "AAA rules: Placement Name = Ad Name. "
+        "Enter the BASE landing URL only; the "
+        "dashboard creates the AAA pmed "
+        "automatically."
+    )
+
+    prisma_file, creative_files = (
+        common_upload_fields(
+            "aaa",
+            allow_zip=True,
+        )
+    )
+
+    creative_setup = st.radio(
+        "Creative setup type",
+        [
+            "Single creative per ad",
+            "Multiple creatives per ad",
+        ],
+        key="aaa_creative_setup",
+    )
+
+    default_base_url = st.text_input(
+        "Base Landing URL",
+        placeholder=(
+            "https://www.ace.aaa.com/"
+            "travel/category/cruises.html"
+        ),
+        key="aaa_default_url",
+    )
+
+    override_dates = st.checkbox(
+        "Override Prisma flight dates",
+        value=False,
+        key="aaa_override_dates",
+    )
+
+    override_start_date = None
+    override_end_date = None
+
+    if override_dates:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            override_start_date = (
+                st.date_input(
+                    "Start Date",
+                    key="aaa_start_date",
+                )
+            )
+
+        with col2:
+            override_end_date = (
+                st.date_input(
+                    "End Date",
+                    key="aaa_end_date",
+                )
+            )
+
+    rotation_by_version = {}
+    separate_url_by_version = {}
+    preview = None
+
+    if (
+        prisma_file is not None
+        and creative_files
+    ):
+        try:
+            preview = preview_aaa_setup(
+                prisma_file=prisma_file,
+                creative_files=creative_files,
+                creative_setup=creative_setup,
+            )
+
+            with st.expander(
+                "AAA Creative Matching Preview",
+                expanded=True,
+            ):
+                for placement in (
+                    preview["placements"]
+                ):
+                    matches = (
+                        placement["matches"]
+                    )
+
+                    st.write(
+                        f"**{placement['dimension'] or 'No dimension'}** "
+                        f"— {placement['placement_name']}"
+                    )
+
+                    if matches:
+                        for creative in matches:
+                            st.caption(
+                                f"↳ {creative}"
+                            )
+
+                    else:
+                        st.warning(
+                            "No creative matched "
+                            "this placement."
+                        )
+
+            for warning in (
+                preview["warnings"]
+            ):
+                st.warning(warning)
+
+        except Exception as exc:
+            st.error(
+                "Unable to preview AAA "
+                f"matching: {exc}"
+            )
+
+    if (
+        creative_setup
+        == "Multiple creatives per ad"
+        and preview is not None
+    ):
+        st.subheader(
+            "Multi Creative Rotation"
+        )
+
+        st.caption(
+            "Rotation is entered once per "
+            "creative VERSION and is reused "
+            "across all matching dimensions. "
+            "For example V1 can be 19% for "
+            "160x600, 300x250, etc."
+        )
+
+        version_groups = (
+            preview["version_groups"]
+        )
+
+        for index, (
+            version,
+            files,
+        ) in enumerate(
+            version_groups.items()
+        ):
+            st.markdown(
+                f"**{version}**"
+            )
+
+            st.caption(
+                " / ".join(files)
+            )
+
+            rotation_by_version[
+                version
+            ] = st.number_input(
+                f"Rotation % — {version}",
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=1.0,
+                key=(
+                    f"aaa_rotation_{index}"
+                ),
+            )
+
+            use_separate_url = (
+                st.checkbox(
+                    "Use a separate landing "
+                    f"URL for {version}",
+                    value=False,
+                    key=(
+                        "aaa_separate_url_"
+                        f"check_{index}"
+                    ),
+                )
+            )
+
+            if use_separate_url:
+                separate_url_by_version[
+                    version
+                ] = st.text_input(
+                    "Separate Base URL — "
+                    f"{version}",
+                    placeholder=(
+                        default_base_url
+                    ),
+                    key=(
+                        "aaa_separate_url_"
+                        f"{index}"
+                    ),
+                )
+
+        rotation_errors = (
+            validate_multi_rotation(
+                preview=preview,
+                rotation_by_version=(
+                    rotation_by_version
+                ),
+            )
+        )
+
+        if rotation_errors:
+            st.warning(
+                "Rotation must total 100% "
+                "for every Multi placement."
+            )
+
+            for error in rotation_errors:
+                st.caption(error)
+
+        else:
+            st.success(
+                "Rotation validation passed: "
+                "each matched Multi placement "
+                "totals 100%."
+            )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="AAA_Tsheet.xlsm",
+        key="aaa_output",
+    )
+
+    if not output_name.lower().endswith(
+        ".xlsm"
+    ):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate AAA T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error(
+                "Please upload the Prisma CSV."
+            )
+
+        elif not creative_files:
+            st.error(
+                "Please upload creative files."
+            )
+
+        elif not default_base_url.strip():
+            st.error(
+                "Please enter the base "
+                "landing URL."
+            )
+
+        elif (
+            creative_setup
+            == "Multiple creatives per ad"
+            and preview is None
+        ):
+            st.error(
+                "AAA creative preview could "
+                "not be created."
+            )
+
+        else:
+            try:
+                if (
+                    creative_setup
+                    == "Multiple creatives per ad"
+                ):
+                    rotation_errors = (
+                        validate_multi_rotation(
+                            preview=preview,
+                            rotation_by_version=(
+                                rotation_by_version
+                            ),
+                        )
+                    )
+
+                    if rotation_errors:
+                        st.error(
+                            "Fix the rotation "
+                            "percentages before "
+                            "generating the "
+                            "T-Sheet."
+                        )
+                        st.stop()
+
+                with st.spinner(
+                    "Generating the AAA "
+                    "T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_aaa_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            creative_setup=creative_setup,
+                            default_base_url=default_base_url,
+                            rotation_by_version=(
+                                rotation_by_version
+                            ),
+                            separate_base_url_by_version=(
+                                separate_url_by_version
+                            ),
+                            override_start_date=(
+                                override_start_date
+                            ),
+                            override_end_date=(
+                                override_end_date
+                            ),
+                        )
+                    )
+
+                ads_processed = (
+                    len(preview.get("placements", []))
+                    if preview is not None
+                    else 0
+                )
+
+                log_dashboard_usage(
+                    account="AAA",
+                    action=(
+                        "T-Sheet Generated"
+                    ),
+                    output_file=output_name,
+                    ads_processed=(
+                        ads_processed
+                    ),
+                    creative_count=len(
+                        creative_files
+                    ),
+                    warning_count=len(
+                        warnings
+                    ),
+                    estimated_minutes_saved=60,
+                )
+
+                st.success(
+                    "AAA T-Sheet generated "
+                    "successfully."
+                )
+
+                st.caption(
+                    "Tracking recorded: "
+                    f"{ads_processed:,} Ads "
+                    "processed."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "AAA Review Warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(
+                                warning
+                            )
+
+                st.download_button(
+                    "Download AAA T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# ANTHEM / ELEVANCE
+# ============================================================
+
+elif selected_account == "Anthem / Elevance":
+    st.success(
+        "Anthem / Elevance automation is ready."
+    )
+
+    st.info(
+        "Upload the Prisma CSV and Anthem "
+        "creative files/ZIPs. One creative "
+        "goes directly to Traffic_Doc; two "
+        "or more matching creatives go to "
+        "the Multi-Ad or Creative Rotation "
+        "tab."
+    )
+
+    prisma_file, creative_files = (
+        common_upload_fields(
+            "anthem",
+            allow_zip=True,
+        )
+    )
+
+    url_mapping_text = st.text_area(
+        "Paste Anthem URL Mapping",
+        placeholder=(
+            "Paste the Anthem URLs, one per line.\n"
+            "The dashboard detects the required "
+            "mapping from the URL."
+        ),
+        height=220,
+        key="anthem_url_mapping",
+    )
+
+    override_dates = st.checkbox(
+        "Override Prisma flight dates",
+        value=False,
+        key="anthem_override_dates",
+    )
+
+    override_start_date = None
+    override_end_date = None
+
+    if override_dates:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            override_start_date = (
+                st.date_input(
+                    "Start Date",
+                    key="anthem_start_date",
+                )
+            )
+
+        with col2:
+            override_end_date = (
+                st.date_input(
+                    "End Date",
+                    key="anthem_end_date",
+                )
+            )
+
+    preview = None
+
+    if (
+        prisma_file is not None
+        and creative_files
+    ):
+        try:
+            preview = (
+                preview_anthem_setup(
+                    prisma_file=prisma_file,
+                    creative_files=creative_files,
+                    url_mapping_text=(
+                        url_mapping_text
+                    ),
+                )
+            )
+
+            placements = (
+                preview["placements"]
+            )
+
+            direct_count = sum(
+                1
+                for row in placements
+                if row[
+                    "creative_destination"
+                ]
+                == "Traffic_Doc"
+            )
+
+            multi_count = sum(
+                1
+                for row in placements
+                if row[
+                    "creative_destination"
+                ]
+                == "Multi"
+            )
+
+            unmatched_count = sum(
+                1
+                for row in placements
+                if row[
+                    "creative_destination"
+                ]
+                == "Unmatched"
+            )
+
+            metric1, metric2, metric3 = (
+                st.columns(3)
+            )
+
+            with metric1:
+                st.metric(
+                    "Direct to Traffic_Doc",
+                    direct_count,
+                )
+
+            with metric2:
+                st.metric(
+                    "Multi Creative Ads",
+                    multi_count,
+                )
+
+            with metric3:
+                st.metric(
+                    "Unmatched Placements",
+                    unmatched_count,
+                )
+
+            with st.expander(
+                "Anthem Creative Matching "
+                "Preview",
+                expanded=True,
+            ):
+                for row in placements:
+                    st.write(
+                        f"**{row['ad_name'] or 'Ad Name not detected'}**"
+                    )
+
+                    st.caption(
+                        "Placement: "
+                        f"{row['placement_name']}"
+                    )
+
+                    st.caption(
+                        "Language / Channel: "
+                        f"{row['language'] or 'Not detected'} / "
+                        f"{row['channel'] or 'Not detected'}"
+                    )
+
+                    st.caption(
+                        "Destination: "
+                        f"{row['creative_destination']}"
+                    )
+
+                    if row["matches"]:
+                        for creative in (
+                            row["matches"]
+                        ):
+                            st.caption(
+                                f"↳ {creative}"
+                            )
+
+                    else:
+                        st.warning(
+                            "No creative matched "
+                            "this placement."
+                        )
+
+                    if not row["url"]:
+                        st.warning(
+                            "No URL mapping found "
+                            "for this placement."
+                        )
+
+                    st.divider()
+
+            if preview["warnings"]:
+                with st.expander(
+                    "Anthem Preview Warnings"
+                ):
+                    for warning in (
+                        preview["warnings"]
+                    ):
+                        st.warning(
+                            warning
+                        )
+
+        except Exception as exc:
+            st.error(
+                "Unable to preview Anthem "
+                f"matching: {exc}"
+            )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Anthem_Tsheet.xlsm",
+        key="anthem_output",
+    )
+
+    if not output_name.lower().endswith(
+        ".xlsm"
+    ):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Anthem T-Sheet",
+        type="primary",
+        use_container_width=True,
+        key="generate_anthem_tsheet",
+    ):
+        if prisma_file is None:
+            st.error(
+                "Please upload the Prisma CSV."
+            )
+
+        elif not creative_files:
+            st.error(
+                "Please upload Anthem creative "
+                "files or ZIPs."
+            )
+
+        elif not url_mapping_text.strip():
+            st.error(
+                "Please paste the Anthem "
+                "URL mapping."
+            )
+
+        else:
+            try:
+                with st.spinner(
+                    "Generating the Anthem "
+                    "T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_anthem_tsheet(
+                            prisma_file=prisma_file,
+                            creative_files=creative_files,
+                            url_mapping_text=(
+                                url_mapping_text
+                            ),
+                            override_start_date=(
+                                override_start_date
+                            ),
+                            override_end_date=(
+                                override_end_date
+                            ),
+                        )
+                    )
+
+                placements = (
+                    preview.get("placements", [])
+                    if preview is not None
+                    else []
+                )
+
+                ads_processed = len(placements)
+
+                direct_count = 0
+                multi_count = 0
+                unmatched_count = 0
+
+                if preview is not None:
+
+                    direct_count = sum(
+                        1
+                        for row in placements
+                        if row.get(
+                            "creative_destination"
+                        )
+                        == "Traffic_Doc"
+                    )
+
+                    multi_count = sum(
+                        1
+                        for row in placements
+                        if row.get(
+                            "creative_destination"
+                        )
+                        == "Multi"
+                    )
+
+                    unmatched_count = sum(
+                        1
+                        for row in placements
+                        if row.get(
+                            "creative_destination"
+                        )
+                        == "Unmatched"
+                    )
+
+                log_dashboard_usage(
+                    account=(
+                        "Anthem / Elevance"
+                    ),
+                    action=(
+                        "T-Sheet Generated"
+                    ),
+                    output_file=output_name,
+                    ads_processed=(
+                        ads_processed
+                    ),
+                    direct_count=(
+                        direct_count
+                    ),
+                    multi_count=(
+                        multi_count
+                    ),
+                    unmatched_count=(
+                        unmatched_count
+                    ),
+                    creative_count=len(
+                        creative_files
+                    ),
+                    warning_count=len(
+                        warnings
+                    ),
+                    estimated_minutes_saved=60,
+                )
+
+                st.success(
+                    "Anthem T-Sheet generated "
+                    "successfully."
+                )
+
+                st.caption(
+                    "Tracking recorded: "
+                    f"{ads_processed:,} Ads "
+                    "processed."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "Review Anthem warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(
+                                warning
+                            )
+
+                st.download_button(
+                    "Download Anthem T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# SIMON VIP
+# ============================================================
+
+elif selected_account == "Simon VIP":
+    st.success(
+        "Simon VIP automation is ready."
+    )
+
+    st.info(
+        "Simon VIP does not use Prisma. Paste "
+        "the Placement taxonomy directly below. "
+        "Placement Name = Ad Name. If no "
+        "creatives are uploaded, Tracking_1x1 "
+        "will be used."
+    )
+
+    placement_text = st.text_area(
+        "Paste Placement Names / Taxonomy",
+        placeholder=(
+            "Paste one Placement Name per line\n"
+            "Example: Simon_..._Arundel Mills_"
+            "..._300x250"
+        ),
+        height=220,
+        key="simon_vip_placements",
+    )
+
+    creative_files = st.file_uploader(
+        "Upload Creative Files (optional)",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "gif",
+            "webp",
+            "html",
+            "htm",
+            "mp4",
+            "zip",
+        ],
+        accept_multiple_files=True,
+        key="simon_vip_creatives",
+    )
+
+    outlet_utm_text = st.text_area(
+        "Paste Outlet Name + UTM",
+        placeholder=(
+            "Arundel Mills\thttps://...\n"
+            "Desert Hills Premium Outlets\t"
+            "https://..."
+        ),
+        height=220,
+        key="simon_vip_utm",
+    )
+
+    outlet_date_text = st.text_area(
+        "Paste Outlet Name + Start Date + End Date",
+        placeholder=(
+            "Arundel Mills\t08/01/2026\t"
+            "08/31/2026\n"
+            "Desert Hills Premium Outlets\t"
+            "08/01/2026\t08/31/2026"
+        ),
+        height=180,
+        key="simon_vip_dates",
+    )
+
+    preview = None
+
+    if (
+        placement_text.strip()
+        and outlet_utm_text.strip()
+        and outlet_date_text.strip()
+    ):
+        try:
+            preview = (
+                preview_simon_vip_setup(
+                    placement_text=placement_text,
+                    creative_files=creative_files,
+                    outlet_utm_text=outlet_utm_text,
+                    outlet_date_text=(
+                        outlet_date_text
+                    ),
+                )
+            )
+
+            (
+                metric_col1,
+                metric_col2,
+                metric_col3,
+            ) = st.columns(3)
+
+            with metric_col1:
+                st.metric(
+                    "Outlet mappings loaded",
+                    preview[
+                        "outlet_mapping_count"
+                    ],
+                )
+
+            with metric_col2:
+                st.metric(
+                    "Placements matched",
+                    preview[
+                        "utm_matched_count"
+                    ],
+                )
+
+            with metric_col3:
+                st.metric(
+                    "Unmatched placements",
+                    preview[
+                        "utm_unmatched_count"
+                    ],
+                )
+
+            if preview[
+                "using_tracking_1x1"
+            ]:
+                st.info(
+                    "No creatives uploaded — "
+                    "Tracking_1x1 will be used "
+                    "for all placements."
+                )
+
+            with st.expander(
+                "Simon VIP Matching Preview",
+                expanded=True,
+            ):
+                for row in (
+                    preview["rows"]
+                ):
+                    st.write(
+                        f"**{row['placement_name']}**"
+                    )
+
+                    st.caption(
+                        "Outlet: "
+                        f"{row['outlet'] or 'Not matched'}"
+                    )
+
+                    st.caption(
+                        "Creative: "
+                        f"{row['creative'] or 'Not matched'}"
+                    )
+
+                    st.caption(
+                        "Dates: "
+                        f"{row['start_date'] or 'Not matched'} "
+                        "to "
+                        f"{row['end_date'] or 'Not matched'}"
+                    )
+
+            if preview["warnings"]:
+                with st.expander(
+                    "Simon VIP Preview Warnings"
+                ):
+                    for warning in (
+                        preview["warnings"]
+                    ):
+                        st.warning(
+                            warning
+                        )
+
+        except Exception as exc:
+            st.error(
+                "Unable to preview Simon VIP "
+                f"matching: {exc}"
+            )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Simon_VIP_Tsheet.xlsm",
+        key="simon_vip_output",
+    )
+
+    if not output_name.lower().endswith(
+        ".xlsm"
+    ):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate Simon VIP T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if not placement_text.strip():
+            st.error(
+                "Please paste the Placement "
+                "taxonomy."
+            )
+
+        elif not outlet_utm_text.strip():
+            st.error(
+                "Please paste Outlet Name "
+                "and UTM mapping."
+            )
+
+        elif not outlet_date_text.strip():
+            st.error(
+                "Please paste Outlet Name, "
+                "Start Date and End Date "
+                "mapping."
+            )
+
+        else:
+            try:
+                with st.spinner(
+                    "Generating the Simon VIP "
+                    "T-Sheet..."
+                ):
+                    output_bytes, warnings = (
+                        generate_simon_vip_tsheet(
+                            placement_text=(
+                                placement_text
+                            ),
+                            creative_files=(
+                                creative_files
+                            ),
+                            outlet_utm_text=(
+                                outlet_utm_text
+                            ),
+                            outlet_date_text=(
+                                outlet_date_text
+                            ),
+                        )
+                    )
+
+                ads_processed = (
+                    len(preview.get("rows", []))
+                    if preview is not None
+                    else 0
+                )
+
+                unmatched_count = 0
+
+                if preview is not None:
+                    unmatched_count = (
+                        preview.get(
+                            "utm_unmatched_count",
+                            0,
+                        )
+                    )
+
+                log_dashboard_usage(
+                    account="Simon VIP",
+                    action=(
+                        "T-Sheet Generated"
+                    ),
+                    output_file=output_name,
+                    ads_processed=(
+                        ads_processed
+                    ),
+                    unmatched_count=(
+                        unmatched_count
+                    ),
+                    creative_count=len(
+                        creative_files or []
+                    ),
+                    warning_count=len(
+                        warnings
+                    ),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success(
+                    "Simon VIP T-Sheet generated "
+                    "successfully."
+                )
+
+                st.caption(
+                    "Tracking recorded: "
+                    f"{ads_processed:,} Ads "
+                    "processed."
+                )
+
+                if warnings:
+                    with st.expander(
+                        "Review Simon VIP warnings"
+                    ):
+                        for warning in warnings:
+                            st.warning(
+                                warning
+                            )
+
+                st.download_button(
+                    "Download Simon VIP T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime=(
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    ),
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# NAMING CONVENTION GENERATOR
+# ============================================================
+
+elif selected_account == (
+    "Naming Convention Generator"
+):
+    st.success(
+        "Naming Convention Generator is ready."
+    )
+
+    st.info(
+        "Copy the complete taxonomy table from "
+        "Excel, including the header row, and "
+        "paste it below. Any number of columns "
+        "and values can be used."
+    )
+
+    taxonomy_text = st.text_area(
+        "Paste Taxonomy Table from Excel",
+        placeholder=(
+            "Header 1\tLOB\tGeo\tCreativeSize\n"
+            "ASM\tTRV\tCA\t300x250\n"
+            "\tINS\tIN\t320x480\n"
+            "\tBrand\tOH\t160x600\n"
+            "\t\tVI\t300x600\n"
+            "\t\tBA\t728x90\n"
+            "\t\t\t970x250"
+        ),
+        height=300,
+        key="naming_taxonomy_table",
+    )
+
+    separator = st.selectbox(
+        "Naming Separator",
+        ["_", "-", "|"],
+        index=0,
+        key="naming_separator",
+    )
+
+    column_values = []
+    usable_columns = []
+    total_combinations = 0
+    table_valid = False
+
+    if taxonomy_text.strip():
+        try:
+            rows = [
+                row.split("\t")
+                for row in (
+                    taxonomy_text.splitlines()
+                )
+                if row.strip()
+            ]
+
+            if len(rows) < 2:
+                st.warning(
+                    "Paste the header row and "
+                    "at least one row of values."
+                )
+
+            else:
+                headers = [
+                    header.strip()
+                    for header in rows[0]
+                ]
+
+                for column_index in range(
+                    len(headers)
+                ):
+                    values = []
+
+                    for row in rows[1:]:
+                        if (
+                            column_index
+                            < len(row)
+                        ):
+                            value = (
+                                row[
+                                    column_index
+                                ].strip()
+                            )
+
+                            if (
+                                value
+                                and value
+                                not in values
+                            ):
+                                values.append(
+                                    value
+                                )
+
+                    column_values.append(
+                        values
+                    )
+
+                usable_columns = [
+                    (h, v)
+                    for h, v in zip(
+                        headers,
+                        column_values,
+                    )
+                    if v
+                ]
+
+                if usable_columns:
+                    table_valid = True
+
+                    st.subheader(
+                        "Detected Taxonomy"
+                    )
+
+                    preview_count = min(
+                        len(usable_columns),
+                        4,
+                    )
+
+                    preview_columns = (
+                        st.columns(
+                            preview_count
+                        )
+                    )
+
+                    for index, (
+                        header,
+                        values,
+                    ) in enumerate(
+                        usable_columns
+                    ):
+                        with preview_columns[
+                            index
+                            % preview_count
+                        ]:
+                            st.metric(
+                                header
+                                or (
+                                    f"Column "
+                                    f"{index + 1}"
+                                ),
+                                len(values),
+                            )
+
+                            preview_text = (
+                                " | ".join(
+                                    values[:8]
+                                )
+                            )
+
+                            if len(values) > 8:
+                                preview_text += (
+                                    " | ..."
+                                )
+
+                            st.caption(
+                                preview_text
+                            )
+
+                    total_combinations = 1
+
+                    for _, values in (
+                        usable_columns
+                    ):
+                        total_combinations *= (
+                            len(values)
+                        )
+
+                    st.info(
+                        "Total naming conventions "
+                        "that will be generated: "
+                        f"{total_combinations:,}"
+                    )
+
+                    if (
+                        total_combinations
+                        > 100000
+                    ):
+                        st.warning(
+                            "This taxonomy will "
+                            "generate more than "
+                            "100,000 combinations. "
+                            "Consider reducing the "
+                            "number of values before "
+                            "generating."
+                        )
+
+        except Exception as exc:
+            st.error(
+                "Unable to read the pasted "
+                f"taxonomy: {exc}"
+            )
+
+    if st.button(
+        "Generate Naming Conventions",
+        type="primary",
+        use_container_width=True,
+        key="generate_naming_conventions",
+    ):
+        if not taxonomy_text.strip():
+            st.error(
+                "Please paste the taxonomy "
+                "table from Excel."
+            )
+
+        elif not table_valid:
+            st.error(
+                "No usable taxonomy values "
+                "were detected."
+            )
+
+        elif total_combinations > 500000:
+            st.error(
+                "More than 500,000 combinations "
+                "were detected. Please reduce "
+                "the taxonomy before generating."
+            )
+
+        else:
+            try:
+                usable_values = [
+                    values
+                    for _, values
+                    in usable_columns
+                ]
+
+                generated_names = [
+                    separator.join(
+                        combination
+                    )
+                    for combination
+                    in itertools.product(
+                        *usable_values
+                    )
+                ]
+
+                output_text = "\n".join(
+                    generated_names
+                )
+
+                log_dashboard_usage(
+                    account=(
+                        "Naming Convention "
+                        "Generator"
+                    ),
+                    action=(
+                        "Naming Generated"
+                    ),
+                    output_file=(
+                        "Naming_Conventions.txt"
+                    ),
+                    ads_processed=len(
+                        generated_names
+                    ),
+                    estimated_minutes_saved=30,
+                )
+
+                st.success(
+                    f"{len(generated_names):,} "
+                    "naming conventions "
+                    "generated successfully."
+                )
+
+                st.text_area(
+                    "Generated Naming "
+                    "Conventions",
+                    value=output_text,
+                    height=400,
+                    key=(
+                        "naming_generated_output"
+                    ),
+                )
+
+                st.download_button(
+                    "Download Naming Conventions",
+                    data=output_text,
+                    file_name=(
+                        "Naming_Conventions.txt"
+                    ),
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# ACCOUNTS NOT YET AUTOMATED
+# ============================================================
+
+
+# ============================================================
+# BROOKS
+# ============================================================
+elif selected_account == "Brooks":
+    st.success("Brooks automation is ready.")
+    st.info(
+        "Automates Prisma mapping, Ad Names, creative matching, 1x1 tracking, "
+        "Multi-Ad rotation and dates. Paste all complete URLs/UTMs in one box; "
+        "the dashboard maps them to the matching Brooks creative concept."
+    )
+
+    prisma_file, creative_files = common_upload_fields("brooks", allow_zip=True)
+
+    brooks_urls_text = st.text_area(
+        "Paste Complete URLs / UTMs",
+        placeholder=(
+            "Paste all complete Brooks URLs/UTMs here, one per line.\n"
+            "Example: https://www.brooksrunning.com/en_us/.../?tid=..."
+        ),
+        height=180,
+        key="brooks_urls",
+    )
+
+    apply_dynata = st.checkbox(
+        "Apply 2026 Dynata pixel note to Display placements",
+        value=False,
+        help="Enable only when the trafficking request requires the Dynata pixel.",
+        key="brooks_dynata",
+    )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Brooks_Tsheet.xlsm",
+        key="brooks_output",
+    )
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button("Preview Brooks Matching", use_container_width=True):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        else:
+            try:
+                preview = preview_brooks_setup(prisma_file, creative_files or [], brooks_urls_text)
+                st.session_state["brooks_preview"] = preview
+            except Exception as exc:
+                st.exception(exc)
+
+    preview = st.session_state.get("brooks_preview")
+    if preview:
+        st.write(f"**Campaign:** {preview['campaign']}")
+        st.write(f"**Concept extracted:** {preview['concept']}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Placements", len(preview["placements"]))
+        c2.metric("Direct", preview["direct_count"])
+        c3.metric("Multi", preview["multi_count"])
+        c4.metric("1x1", preview["tracking_1x1_count"])
+
+        preview_rows = [
+            {
+                "Placement ID": p["placement_id"],
+                "Dimension": p["size"],
+                "Ad Name": p["ad_name"],
+                "Status": p["status"],
+                "Matched Creatives": ", ".join(p["matches"]),
+            }
+            for p in preview["placements"]
+        ]
+        st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+        if preview["warnings"]:
+            with st.expander("Preview warnings"):
+                for warning in preview["warnings"]:
+                    st.warning(warning)
+
+    if st.button(
+        "Generate Brooks T-Sheet",
+        type="primary",
+        use_container_width=True,
+    ):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        else:
+            try:
+                with st.spinner("Generating Brooks T-Sheet..."):
+                    output_bytes, warnings, preview = generate_brooks_tsheet(
+                        prisma_file,
+                        creative_files or [],
+                        brooks_urls_text,
+                        apply_dynata_display=apply_dynata,
+                    )
+
+                log_dashboard_usage(
+                    account="Brooks",
+                    action="T-Sheet Generated",
+                    output_file=output_name,
+                    ads_processed=len(preview["placements"]),
+                    direct_count=preview["direct_count"],
+                    multi_count=preview["multi_count"],
+                    unmatched_count=preview["unmatched_count"],
+                    creative_count=preview["creative_count"],
+                    warning_count=len(warnings),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success("Brooks T-Sheet generated successfully.")
+                st.caption(
+                    f"{len(preview['placements'])} placements processed | "
+                    f"{preview['tracking_1x1_count']} Tracking_1x1 | "
+                    f"{preview['multi_count']} Multi-Ad placements"
+                )
+
+                if warnings:
+                    with st.expander("Review Brooks warnings"):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download Brooks T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.exception(exc)
+
+else:
+    st.info(
+        f"{selected_account} is visible in the "
+        "dashboard. Its account-specific "
+        "automation will be added later."
+    )
