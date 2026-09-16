@@ -47,7 +47,6 @@ AUDIENCE_ALIASES = {
     },
 }
 
-# Tokens which are useful in the placement but are NOT part of the pmed.
 PMED_IGNORE_TOKENS = {
     "MPC",
     "N/A",
@@ -108,6 +107,7 @@ def _decode_csv(data: bytes) -> str:
             return data.decode(encoding)
         except UnicodeDecodeError:
             continue
+
     return data.decode("utf-8", errors="replace")
 
 
@@ -129,9 +129,17 @@ def _read_csv_rows(uploaded_file) -> list[list[str]]:
 def _find_prisma_header(
     raw_rows: list[list[str]],
 ) -> tuple[int, list[str]]:
+
     for index, row in enumerate(raw_rows):
-        headers = [_clean(cell).replace("\n", " ") for cell in row]
-        normalized = {_normalize(header) for header in headers}
+        headers = [
+            _clean(cell).replace("\n", " ")
+            for cell in row
+        ]
+
+        normalized = {
+            _normalize(header)
+            for header in headers
+        }
 
         if "placementname" in normalized:
             return index, headers
@@ -146,13 +154,17 @@ def _get_record_value(
     record: dict[str, str],
     *possible_headers: str,
 ) -> str:
+
     normalized_record = {
         _normalize(key): value
         for key, value in record.items()
     }
 
     for header in possible_headers:
-        value = normalized_record.get(_normalize(header))
+        value = normalized_record.get(
+            _normalize(header)
+        )
+
         if value is not None and _clean(value):
             return _clean(value)
 
@@ -162,17 +174,41 @@ def _get_record_value(
 def read_prisma_export(
     uploaded_file,
 ) -> tuple[list[list[str]], list[dict[str, str]]]:
+
     raw_rows = _read_csv_rows(uploaded_file)
-    header_index, headers = _find_prisma_header(raw_rows)
+
+    header_index, headers = _find_prisma_header(
+        raw_rows
+    )
 
     records: list[dict[str, str]] = []
 
-    for source_index in range(header_index + 1, len(raw_rows)):
+    for source_index in range(
+        header_index + 1,
+        len(raw_rows),
+    ):
         source_row = raw_rows[source_index]
-        padded = source_row + [""] * max(0, len(headers) - len(source_row))
-        record = dict(zip(headers, padded[:len(headers)]))
 
-        placement = _get_record_value(record, "Placement Name")
+        padded = (
+            source_row
+            + [""] * max(
+                0,
+                len(headers) - len(source_row),
+            )
+        )
+
+        record = dict(
+            zip(
+                headers,
+                padded[:len(headers)],
+            )
+        )
+
+        placement = _get_record_value(
+            record,
+            "Placement Name",
+        )
+
         if not placement:
             continue
 
@@ -190,7 +226,9 @@ def read_prisma_export(
             continue
 
         record["_placement_name"] = placement
-        record["_source_excel_row"] = str(source_index + 1)
+        record["_source_excel_row"] = str(
+            source_index + 1
+        )
 
         record["_site_name"] = _get_record_value(
             record,
@@ -216,6 +254,8 @@ def read_prisma_export(
             "Creative size",
             "Creative Size",
             "Size",
+            "Tag size",
+            "Ad size",
         )
 
         record["_start_date"] = _get_record_value(
@@ -247,36 +287,64 @@ def _extract_dimension(text: str) -> str:
         r"(?<!\d)(\d{2,4})\s*[xX×*]\s*(\d{2,4})(?!\d)",
         _clean(text),
     )
+
     if not match:
         return ""
+
     return f"{match.group(1)}x{match.group(2)}"
 
 
-def placement_dimension(record: dict[str, str]) -> str:
-    dimension = _extract_dimension(record.get("_dimension", ""))
+def placement_dimension(
+    record: dict[str, str],
+) -> str:
+
+    dimension = _extract_dimension(
+        record.get("_dimension", "")
+    )
+
     if dimension:
         return dimension
 
-    return _extract_dimension(record.get("_placement_name", ""))
+    return _extract_dimension(
+        record.get("_placement_name", "")
+    )
 
 
-def _extract_audience(placement_name: str) -> str:
-    placement_normalized = _normalize(placement_name)
+def _extract_audience(
+    placement_name: str,
+) -> str:
+
+    placement_normalized = _normalize(
+        placement_name
+    )
+
     placement_lower = placement_name.lower()
 
-    parts = [part.strip() for part in placement_name.split("_")]
+    parts = [
+        part.strip()
+        for part in placement_name.split("_")
+    ]
 
     for part in parts:
         upper = part.upper().strip()
-        if upper in ("LAL", "PR", "RT"):
+
+        if upper in (
+            "LAL",
+            "PR",
+            "RT",
+        ):
             return upper
 
     for code, aliases in AUDIENCE_ALIASES.items():
+
         for alias in aliases:
             if alias in placement_lower:
                 return code
 
-        if _normalize(code) in placement_normalized:
+        if (
+            _normalize(code)
+            in placement_normalized
+        ):
             return code
 
     return ""
@@ -287,22 +355,31 @@ def _extract_aaa_taxonomy(
     site_name: str = "",
 ) -> dict[str, str]:
 
-    parts = [part.strip() for part in placement_name.split("_")]
+    parts = [
+        part.strip()
+        for part in placement_name.split("_")
+    ]
 
     platform = ""
     tactic = ""
     lob = ""
 
     if parts and parts[0].upper() == "DSP":
+
         if len(parts) > 1:
             platform = parts[1].upper()
+
         if len(parts) > 2:
             tactic = parts[2].upper()
+
         if len(parts) > 3:
             lob = parts[3].upper()
 
     if not platform:
-        site = _clean(site_name).upper()
+
+        site = _clean(
+            site_name
+        ).upper()
 
         platform_aliases = {
             "ACCUWEATHER": "ACW",
@@ -315,11 +392,14 @@ def _extract_aaa_taxonomy(
         }
 
         for name, code in platform_aliases.items():
+
             if name in site:
                 platform = code
                 break
 
-    audience = _extract_audience(placement_name)
+    audience = _extract_audience(
+        placement_name
+    )
 
     return {
         "lob": lob,
@@ -341,7 +421,12 @@ def build_aaa_pmed(
 
     missing = [
         name
-        for name in ("lob", "tactic", "platform", "audience")
+        for name in (
+            "lob",
+            "tactic",
+            "platform",
+            "audience",
+        )
         if not taxonomy[name]
     ]
 
@@ -366,7 +451,9 @@ def build_aaa_url(
     site_name: str = "",
 ) -> str:
 
-    base_url = _clean(base_url)
+    base_url = _clean(
+        base_url
+    )
 
     if not base_url:
         return ""
@@ -376,8 +463,14 @@ def build_aaa_url(
         site_name=site_name,
     )
 
-    parts = urlsplit(base_url)
-    query_items = parse_qsl(parts.query, keep_blank_values=True)
+    parts = urlsplit(
+        base_url
+    )
+
+    query_items = parse_qsl(
+        parts.query,
+        keep_blank_values=True,
+    )
 
     query_items = [
         (key, value)
@@ -385,7 +478,12 @@ def build_aaa_url(
         if key.lower() != "pmed"
     ]
 
-    query_items.append(("pmed", pmed))
+    query_items.append(
+        (
+            "pmed",
+            pmed,
+        )
+    )
 
     query = urlencode(
         query_items,
@@ -411,24 +509,36 @@ def _creative_names_from_uploads(
     names: list[str] = []
 
     for uploaded_file in creative_files or []:
-        file_name = Path(uploaded_file.name).name
+
+        file_name = Path(
+            uploaded_file.name
+        ).name
 
         if file_name.lower().endswith(".zip"):
+
             uploaded_file.seek(0)
 
-            with zipfile.ZipFile(uploaded_file, "r") as archive:
+            with zipfile.ZipFile(
+                uploaded_file,
+                "r",
+            ) as archive:
+
                 for member in archive.namelist():
 
                     if member.endswith("/"):
                         continue
 
-                    name = Path(member).name
+                    name = Path(
+                        member
+                    ).name
 
                     if name:
                         names.append(name)
 
         else:
-            names.append(file_name)
+            names.append(
+                file_name
+            )
 
     return list(
         dict.fromkeys(
@@ -443,7 +553,9 @@ def creative_version_key(
     creative_name: str,
 ) -> str:
 
-    stem = Path(creative_name).stem
+    stem = Path(
+        creative_name
+    ).stem
 
     stem = re.sub(
         r"(?<!\d)\d{2,4}\s*[xX×*]\s*\d{2,4}(?!\d)",
@@ -464,14 +576,21 @@ def creative_version_key(
         stem,
     )
 
-    return stem or Path(creative_name).stem
+    return (
+        stem
+        or Path(
+            creative_name
+        ).stem
+    )
 
 
 def _creative_content_tokens(
     name: str,
 ) -> set[str]:
 
-    stem = Path(name).stem
+    stem = Path(
+        name
+    ).stem
 
     stem = re.sub(
         r"(?<!\d)\d{2,4}\s*[xX×*]\s*\d{2,4}(?!\d)",
@@ -481,7 +600,9 @@ def _creative_content_tokens(
 
     tokens = set()
 
-    for token in _words(stem):
+    for token in _words(
+        stem
+    ):
 
         if len(token) < 3:
             continue
@@ -489,7 +610,9 @@ def _creative_content_tokens(
         if token in GENERIC_CREATIVE_WORDS:
             continue
 
-        tokens.add(token)
+        tokens.add(
+            token
+        )
 
     return tokens
 
@@ -500,7 +623,9 @@ def _single_creative_score(
     required_dimension: str,
 ) -> float:
 
-    creative_dimension = _extract_dimension(creative_name)
+    creative_dimension = _extract_dimension(
+        creative_name
+    )
 
     placement_normalized = _normalize(
         placement_name
@@ -512,6 +637,7 @@ def _single_creative_score(
 
     score = 0.0
 
+    # Dimension must match for standard display placements.
     if (
         required_dimension
         and required_dimension.lower() != "1x1"
@@ -561,14 +687,26 @@ def _single_creative_score(
             score += 20
 
     overlap = (
-        set(_words(creative_stem))
-        & set(_words(placement_name))
+        set(
+            _words(
+                creative_stem
+            )
+        )
+        &
+        set(
+            _words(
+                placement_name
+            )
+        )
     )
 
-    score += min(
-        len(overlap),
-        6,
-    ) * 2
+    score += (
+        min(
+            len(overlap),
+            6,
+        )
+        * 2
+    )
 
     if (
         normalized_stem
@@ -629,16 +767,16 @@ def match_multi_creatives(
     if not required_dimension:
         return []
 
-    matches = [
+    return [
         name
         for name in creative_names
         if (
-            _extract_dimension(name).lower()
+            _extract_dimension(
+                name
+            ).lower()
             == required_dimension.lower()
         )
     ]
-
-    return matches
 
 
 def preview_aaa_setup(
@@ -682,12 +820,10 @@ def preview_aaa_setup(
 
         else:
 
-            creative, tied = (
-                match_single_creative(
-                    creative_names=creative_names,
-                    placement_name=placement_name,
-                    required_dimension=dimension,
-                )
+            creative, tied = match_single_creative(
+                creative_names=creative_names,
+                placement_name=placement_name,
+                required_dimension=dimension,
             )
 
             matches = (
@@ -742,7 +878,10 @@ def _find_traffic_layout(
 
     for row in range(
         1,
-        min(sheet.max_row, 30) + 1,
+        min(
+            sheet.max_row,
+            30,
+        ) + 1,
     ):
 
         d_value = _clean(
@@ -763,7 +902,10 @@ def _find_traffic_layout(
             "placement name" in d_value
             and "ad name" in h_value
         ):
-            return row, row + 1
+            return (
+                row,
+                row + 1,
+            )
 
     raise ValueError(
         "Unable to locate Traffic_Doc headers "
@@ -813,9 +955,9 @@ def _apply_row_format(
     snapshot: dict,
 ) -> None:
 
-    for column, style in (
-        snapshot["cells"].items()
-    ):
+    for column, style in snapshot[
+        "cells"
+    ].items():
 
         cell = sheet.cell(
             row=row_number,
@@ -852,7 +994,9 @@ def _apply_row_format(
 
     sheet.row_dimensions[
         row_number
-    ].height = snapshot["height"]
+    ].height = snapshot[
+        "height"
+    ]
 
 
 def _clear_sheet_values(
@@ -898,18 +1042,12 @@ def _paste_prisma_rows(
     raw_rows: list[list[str]],
 ) -> None:
 
-    for (
-        row_number,
-        row_values,
-    ) in enumerate(
+    for row_number, row_values in enumerate(
         raw_rows,
         start=1,
     ):
 
-        for (
-            column_number,
-            value,
-        ) in enumerate(
+        for column_number, value in enumerate(
             row_values,
             start=1,
         ):
@@ -936,7 +1074,9 @@ def _clear_existing_merges_below_header(
         ):
 
             sheet.unmerge_cells(
-                str(merged_range)
+                str(
+                    merged_range
+                )
             )
 
 
@@ -944,7 +1084,9 @@ def _to_excel_date_or_text(
     value: str,
 ):
 
-    value = _clean(value)
+    value = _clean(
+        value
+    )
 
     if not value:
         return ""
@@ -1021,7 +1163,10 @@ def _resolve_dates(
         )
     )
 
-    return start, end
+    return (
+        start,
+        end,
+    )
 
 
 def _version_rotation_for_creative(
@@ -1040,7 +1185,10 @@ def _version_rotation_for_creative(
     if value is None:
         return None
 
-    return float(value) / 100.0
+    return (
+        float(value)
+        / 100.0
+    )
 
 
 def _version_url_for_creative(
@@ -1080,11 +1228,10 @@ def _populate_traffic_sheet(
         TRAFFIC_SHEET
     ]
 
-    (
-        header_row,
-        first_data_row,
-    ) = _find_traffic_layout(
-        sheet
+    header_row, first_data_row = (
+        _find_traffic_layout(
+            sheet
+        )
     )
 
     style_source_row = (
@@ -1145,13 +1292,12 @@ def _populate_traffic_sheet(
             "_site_name"
         ]
 
-        (
-            start_date,
-            end_date,
-        ) = _resolve_dates(
-            record,
-            override_start_date,
-            override_end_date,
+        start_date, end_date = (
+            _resolve_dates(
+                record,
+                override_start_date,
+                override_end_date,
+            )
         )
 
         try:
@@ -1167,7 +1313,9 @@ def _populate_traffic_sheet(
             final_url = ""
 
             warnings.append(
-                str(exc)
+                str(
+                    exc
+                )
             )
 
         # Placement Name = Ad Name for AAA.
@@ -1257,13 +1405,12 @@ def _populate_traffic_sheet(
 
         else:
 
-            (
-                creative,
-                tied,
-            ) = match_single_creative(
-                creative_names=creative_names,
-                placement_name=placement_name,
-                required_dimension=dimension,
+            creative, tied = (
+                match_single_creative(
+                    creative_names=creative_names,
+                    placement_name=placement_name,
+                    required_dimension=dimension,
+                )
             )
 
             if tied:
@@ -1272,7 +1419,9 @@ def _populate_traffic_sheet(
                     "Ambiguous creative match — "
                     "manual review required: "
                     f"{placement_name} -> "
-                    + ", ".join(tied)
+                    + ", ".join(
+                        tied
+                    )
                 )
 
             if not creative:
@@ -1301,8 +1450,7 @@ def _populate_traffic_sheet(
             if (
                 creative
                 and dimension
-                and dimension.lower()
-                != "1x1"
+                and dimension.lower() != "1x1"
                 and creative_dimension
                 and creative_dimension.lower()
                 != dimension.lower()
@@ -1311,8 +1459,7 @@ def _populate_traffic_sheet(
                 warnings.append(
                     f"Dimension mismatch: "
                     f"placement {dimension}, "
-                    f"creative "
-                    f"{creative_dimension} — "
+                    f"creative {creative_dimension} — "
                     f"{placement_name}"
                 )
 
@@ -1366,10 +1513,7 @@ def _populate_multi_sheet(
     )
 
     warnings = []
-
-    output_row = (
-        first_data_row
-    )
+    output_row = first_data_row
 
     for record in records:
 
@@ -1395,26 +1539,21 @@ def _populate_multi_sheet(
         if not matches:
 
             warnings.append(
-                "No creatives matched "
-                "Multi placement dimension "
-                f"{dimension}: "
-                f"{placement_name}"
+                "No creatives matched Multi placement dimension "
+                f"{dimension}: {placement_name}"
             )
 
             continue
 
-        (
-            start_date,
-            end_date,
-        ) = _resolve_dates(
-            record,
-            override_start_date,
-            override_end_date,
+        start_date, end_date = (
+            _resolve_dates(
+                record,
+                override_start_date,
+                override_end_date,
+            )
         )
 
-        block_start = (
-            output_row
-        )
+        block_start = output_row
 
         for creative_name in matches:
 
@@ -1434,8 +1573,7 @@ def _populate_multi_sheet(
             if rotation is None:
 
                 warnings.append(
-                    "Rotation % missing for "
-                    "creative version "
+                    "Rotation % missing for creative version "
                     f"'{creative_version_key(creative_name)}'."
                 )
 
@@ -1464,7 +1602,9 @@ def _populate_multi_sheet(
                 final_url = ""
 
                 warnings.append(
-                    str(exc)
+                    str(
+                        exc
+                    )
                 )
 
             sheet.cell(
@@ -1513,10 +1653,7 @@ def _populate_multi_sheet(
             column=1,
         ).value = placement_name
 
-        if (
-            block_end
-            > block_start
-        ):
+        if block_end > block_start:
 
             sheet.merge_cells(
                 start_row=block_start,
@@ -1551,23 +1688,22 @@ def validate_multi_rotation(
 
         for creative in matches:
 
-            key = (
-                creative_version_key(
-                    creative
-                )
+            key = creative_version_key(
+                creative
             )
 
-            value = (
-                rotation_by_version.get(
-                    key
-                )
+            value = rotation_by_version.get(
+                key
             )
 
             if value is None:
-                missing.append(key)
-
+                missing.append(
+                    key
+                )
             else:
-                total += float(value)
+                total += float(
+                    value
+                )
 
         if missing:
 
@@ -1576,25 +1712,23 @@ def validate_multi_rotation(
                 "missing rotation for "
                 + ", ".join(
                     sorted(
-                        set(missing)
+                        set(
+                            missing
+                        )
                     )
                 )
             )
 
             continue
 
-        if (
-            abs(
-                total - 100.0
-            )
-            > 0.01
-        ):
+        if abs(
+            total - 100.0
+        ) > 0.01:
 
             errors.append(
                 f"{placement['placement_name']}: "
                 f"rotation totals "
-                f"{total:.2f}% "
-                "instead of 100%."
+                f"{total:.2f}% instead of 100%."
             )
 
     return errors
@@ -1606,9 +1740,7 @@ def generate_aaa_tsheet(
     creative_setup: str,
     default_base_url: str,
 
-    # NEW:
-    # The link entered in the dashboard will be
-    # copied directly into Traffic_Doc!B2.
+    # NEW FIELD
     creative_dropbox_link: str = "",
 
     rotation_by_version: dict[str, float] | None = None,
@@ -1633,11 +1765,10 @@ def generate_aaa_tsheet(
             "Invalid AAA creative setup type."
         )
 
-    (
-        raw_rows,
-        records,
-    ) = read_prisma_export(
-        prisma_file
+    raw_rows, records = (
+        read_prisma_export(
+            prisma_file
+        )
     )
 
     creative_names = (
@@ -1669,13 +1800,12 @@ def generate_aaa_tsheet(
         ):
 
             raise KeyError(
-                "Missing worksheet in "
-                "master template: "
+                f"Missing worksheet in master template: "
                 f"{required_sheet}"
             )
 
     # ---------------------------------------------------------
-    # Paste Prisma export
+    # Paste Prisma
     # ---------------------------------------------------------
 
     prisma_sheet = workbook[
@@ -1692,7 +1822,7 @@ def generate_aaa_tsheet(
     )
 
     # ---------------------------------------------------------
-    # Traffic Doc campaign-level information
+    # Traffic Doc top-level values
     # ---------------------------------------------------------
 
     traffic_sheet = workbook[
@@ -1706,27 +1836,27 @@ def generate_aaa_tsheet(
     )
 
     if campaign_name:
-        traffic_sheet["B1"] = campaign_name
 
-    # ---------------------------------------------------------
-    # NEW — Creative Dropbox / OneDrive link
-    # ---------------------------------------------------------
-    #
-    # Whatever link the user enters in the dashboard is
-    # written directly into cell B2.
-    #
-    # Example:
-    # https://company-my.sharepoint.com/...
-    #
-    # Traffic_Doc!B2 = that exact link
-    # ---------------------------------------------------------
+        traffic_sheet[
+            "B1"
+        ] = campaign_name
 
-    traffic_sheet["B2"] = _clean(
+    # =========================================================
+    # NEW:
+    # Creative Dropbox / OneDrive Link
+    #
+    # Whatever URL is entered in the dashboard is copied
+    # exactly into Traffic_Doc!B2.
+    # =========================================================
+
+    traffic_sheet[
+        "B2"
+    ] = _clean(
         creative_dropbox_link
     )
 
     # ---------------------------------------------------------
-    # Populate Traffic Doc
+    # Populate Traffic_Doc
     # ---------------------------------------------------------
 
     warnings = (
@@ -1742,7 +1872,7 @@ def generate_aaa_tsheet(
     )
 
     # ---------------------------------------------------------
-    # Existing Multi logic — unchanged
+    # Existing Multi logic
     # ---------------------------------------------------------
 
     if (
@@ -1778,8 +1908,7 @@ def generate_aaa_tsheet(
         if rotation_errors:
 
             raise ValueError(
-                "AAA Multi rotation "
-                "validation failed:\n"
+                "AAA Multi rotation validation failed:\n"
                 + "\n".join(
                     rotation_errors
                 )
@@ -1802,7 +1931,7 @@ def generate_aaa_tsheet(
 
     else:
 
-        # Single setup should not retain old Multi-tab data.
+        # Single setup should not retain old Multi data.
 
         multi_sheet = workbook[
             MULTI_SHEET
