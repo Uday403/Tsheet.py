@@ -18,6 +18,10 @@ from brooks import (
     generate_brooks_tsheet,
     preview_brooks_setup,
 )
+from bfas import (
+    generate_bfas_tsheet,
+    preview_bfas_setup,
+)
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 from simon_vip import (
@@ -34,6 +38,7 @@ ACCOUNT_NAMES = [
     "Simon VIP",
     "Anthem / Elevance",
     "Brooks",
+    "BFAS",
     "UPS Store",
     "Hyatt",
     "USTA",
@@ -1062,6 +1067,227 @@ elif selected_account == "Brooks":
                     mime="application/vnd.ms-excel.sheet.macroEnabled.12",
                     use_container_width=True,
                 )
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# BFAS
+# ============================================================
+
+elif selected_account == "BFAS":
+    st.success("BFAS automation is ready.")
+    st.info(
+        "BFAS does not use Prisma. Paste Placement Names directly. "
+        "Placement Name = Ad Name. Creative matching uses shared wording "
+        "plus the required dimension or video length."
+    )
+
+    placement_text = st.text_area(
+        "Paste Placement Names",
+        placeholder=(
+            "Paste one Placement Name per line\n"
+            "Example: BFS-2607-Refresh 2 FY26 Q4 Engagement Creative "
+            "Platform-R4-Finals-Display-300x250"
+        ),
+        height=240,
+        key="bfas_placements",
+    )
+
+    creative_files = st.file_uploader(
+        "Upload Creative Files",
+        type=[
+            "jpg", "jpeg", "png", "gif", "webp",
+            "html", "htm", "mp4", "zip",
+        ],
+        accept_multiple_files=True,
+        key="bfas_creatives",
+    )
+
+    creative_path = st.text_input(
+        "Creative Dropbox / OneDrive Link",
+        placeholder="Paste the creative folder/link here",
+        key="bfas_creative_path",
+        help="This value will be written to B2 in Traffic_Doc.",
+    )
+
+    st.caption(
+        "If all creatives use the same URL, paste one complete URL. "
+        "If different creative sets use different URLs, paste "
+        "Set Name + URL, one set per line."
+    )
+
+    url_mapping_text = st.text_area(
+        "Paste Complete URLs / Creative Set URL Mapping",
+        placeholder=(
+            "One URL for all creatives:\n"
+            "https://bestfriends.org/...\n\n"
+            "OR by creative set:\n"
+            "Engagement R4\thttps://bestfriends.org/...\n"
+            "Adoption\thttps://bestfriends.org/..."
+        ),
+        height=220,
+        key="bfas_urls",
+    )
+
+    campaign_name = st.text_input(
+        "Campaign Name (optional)",
+        placeholder="Written to Traffic_Doc B1 when provided",
+        key="bfas_campaign_name",
+    )
+
+    site_name = st.text_input(
+        "Site Name",
+        value="Nexxen",
+        key="bfas_site_name",
+    )
+
+    date_col1, date_col2 = st.columns(2)
+
+    with date_col1:
+        start_date = st.date_input(
+            "Start Date",
+            key="bfas_start_date",
+        )
+
+    with date_col2:
+        end_date = st.date_input(
+            "End Date",
+            key="bfas_end_date",
+        )
+
+    preview = None
+
+    if placement_text.strip() and creative_files:
+        try:
+            preview = preview_bfas_setup(
+                placement_text=placement_text,
+                creative_files=creative_files,
+                url_mapping_text=url_mapping_text,
+            )
+
+            metric1, metric2, metric3, metric4 = st.columns(4)
+            metric1.metric("Placements", len(preview["rows"]))
+            metric2.metric("Creatives Loaded", preview["creative_count"])
+            metric3.metric("Creative Matches", preview["matched_count"])
+            metric4.metric("URL Matches", preview["url_matched_count"])
+
+            with st.expander(
+                "BFAS Creative Matching Preview",
+                expanded=True,
+            ):
+                preview_rows = [
+                    {
+                        "Placement / Ad Name": row["placement_name"],
+                        "Size": row["size"],
+                        "Creative": row["creative"] or "UNMATCHED",
+                        "Creative Set": row["creative_set"],
+                        "URL": row["url"] or "UNMATCHED",
+                    }
+                    for row in preview["rows"]
+                ]
+
+                st.dataframe(
+                    preview_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            if preview["warnings"]:
+                with st.expander("BFAS Preview Warnings"):
+                    for warning in preview["warnings"]:
+                        st.warning(warning)
+
+        except Exception as exc:
+            st.error(f"Unable to preview BFAS matching: {exc}")
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="BFAS_Tsheet.xlsm",
+        key="bfas_output",
+    )
+
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate BFAS T-Sheet",
+        type="primary",
+        use_container_width=True,
+        key="generate_bfas_tsheet",
+    ):
+        if not placement_text.strip():
+            st.error("Please paste the BFAS Placement Names.")
+
+        elif not creative_files:
+            st.error("Please upload BFAS creative files or a ZIP.")
+
+        elif not creative_path.strip():
+            st.error(
+                "Please enter the Creative Dropbox / OneDrive Link."
+            )
+
+        elif not url_mapping_text.strip():
+            st.error(
+                "Please paste the complete URL or creative-set URL mapping."
+            )
+
+        elif start_date > end_date:
+            st.error("End Date cannot be earlier than Start Date.")
+
+        else:
+            try:
+                with st.spinner("Generating the BFAS T-Sheet..."):
+                    output_bytes, warnings, generated_preview = (
+                        generate_bfas_tsheet(
+                            placement_text=placement_text,
+                            creative_files=creative_files,
+                            url_mapping_text=url_mapping_text,
+                            creative_path=creative_path,
+                            start_date=start_date,
+                            end_date=end_date,
+                            campaign_name=campaign_name,
+                            site_name=site_name,
+                        )
+                    )
+
+                ads_processed = len(generated_preview["rows"])
+                matched_count = generated_preview["matched_count"]
+                unmatched_count = generated_preview["unmatched_count"]
+
+                log_dashboard_usage(
+                    account="BFAS",
+                    action="T-Sheet Generated",
+                    output_file=output_name,
+                    ads_processed=ads_processed,
+                    direct_count=matched_count,
+                    multi_count=0,
+                    unmatched_count=unmatched_count,
+                    creative_count=generated_preview["creative_count"],
+                    warning_count=len(warnings),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success("BFAS T-Sheet generated successfully.")
+                st.caption(
+                    f"{ads_processed:,} placements processed | "
+                    f"{matched_count:,} creative matches | "
+                    f"{unmatched_count:,} unmatched"
+                )
+
+                if warnings:
+                    with st.expander("Review BFAS warnings"):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download BFAS T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    use_container_width=True,
+                )
+
             except Exception as exc:
                 st.exception(exc)
 
