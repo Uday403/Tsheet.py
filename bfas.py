@@ -482,7 +482,6 @@ def generate_bfas_tsheet(
     placement_text: str,
     creative_files,
     url_mapping_text: str,
-    creative_path: str = "",
     start_date=None,
     end_date=None,
     campaign_name: str = "",
@@ -498,7 +497,6 @@ def generate_bfas_tsheet(
     - Creative match requires dimension/video-length match, then shared words.
     - One URL may apply to all creatives, or URLs can be mapped by set keyword.
     - Rotation = 100%.
-    - Creative Path is written to Traffic_Doc!B2.
     """
     try:
         from openpyxl import load_workbook
@@ -531,10 +529,9 @@ def generate_bfas_tsheet(
 
     sheet = workbook[TRAFFIC_SHEET]
 
-    # Campaign Name and Creative Path.
+    # Optional campaign name.
     if campaign_name:
         sheet["B1"] = campaign_name
-    sheet["B2"] = _clean(creative_path)
 
     header_row = _find_header_row(sheet)
     first_data_row = header_row + 1
