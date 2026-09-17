@@ -1104,12 +1104,6 @@ elif selected_account == "BFAS":
         key="bfas_creatives",
     )
 
-    creative_path = st.text_input(
-        "Creative Dropbox / OneDrive Link",
-        placeholder="Paste the creative folder/link here",
-        key="bfas_creative_path",
-        help="This value will be written to B2 in Traffic_Doc.",
-    )
 
     st.caption(
         "If all creatives use the same URL, paste one complete URL. "
@@ -1222,10 +1216,6 @@ elif selected_account == "BFAS":
         elif not creative_files:
             st.error("Please upload BFAS creative files or a ZIP.")
 
-        elif not creative_path.strip():
-            st.error(
-                "Please enter the Creative Dropbox / OneDrive Link."
-            )
 
         elif not url_mapping_text.strip():
             st.error(
@@ -1243,7 +1233,6 @@ elif selected_account == "BFAS":
                             placement_text=placement_text,
                             creative_files=creative_files,
                             url_mapping_text=url_mapping_text,
-                            creative_path=creative_path,
                             start_date=start_date,
                             end_date=end_date,
                             campaign_name=campaign_name,
