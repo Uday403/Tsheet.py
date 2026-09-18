@@ -656,12 +656,10 @@ def match_anthem_creatives(
             matches.append(name)
         return matches
 
-    # Uploaded MP4 creatives are OLV / Video assets only.
-    # Do NOT map them to CTV placements.
-    if channel == "CTV":
-        return []
-
-    if channel == "Video":
+    # The same uploaded MP4 creative set is eligible for both OLV/Video
+    # and CTV. Language comes from the EN/SP upload bucket and duration
+    # must match the placement (15s -> 15s, 30s -> 30s).
+    if channel in ("Video", "CTV"):
         matches = []
         for name in creative_names:
             if not name.lower().endswith(".mp4"):
@@ -957,7 +955,7 @@ def preview_anthem_setup(
             url_map,
         )
 
-        if not matches and detect_channel(record) != "CTV":
+        if not matches:
             warnings.append(
                 "No Anthem creative matched: "
                 f"{placement_name}"
@@ -1590,11 +1588,9 @@ def generate_anthem_tsheet(
     Display matching:
       Language + exact dimension
 
-    Video/OLV matching:
-      Language + duration + 16x9
-
-    CTV:
-      Uploaded OLV MP4 creatives are not mapped to CTV.
+    Video/OLV + CTV matching:
+      The same uploaded MP4 set is used for both channels.
+      Language + duration + 16x9 must match.
 
     URL mapping:
       one URL for each Language + Channel combination.
