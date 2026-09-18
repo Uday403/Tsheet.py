@@ -572,31 +572,27 @@ def creative_language(creative_name: str) -> str:
 
     return ""
 
-def creative_duration(
-    creative_name: str,
-) -> str:
+def creative_duration(creative_name: str) -> str:
+    """
+    Detect video/audio duration from common Anthem creative naming:
+    15, 15s, 15sec, 15-sec, 15 second, 15_16x9, Family15s_16x9, etc.
+    """
     stem = Path(creative_name).stem
 
-    # Example:
-    # "... Back to School 15 16x9 VD ..."
-    match = re.search(
-        r"(?<!\d)(6|15|30|60|90)\s+"
-        r"(?:16\s*[xX]\s*9|9\s*[xX]\s*16)(?!\d)",
-        stem,
-        flags=re.IGNORECASE,
-    )
+    patterns = [
+        r"(?<!\d)(6|15|30|60|90)\s*[-_]?\s*(?:s|sec|secs|second|seconds)(?![a-z0-9])",
+        r"(?<!\d)(6|15|30|60|90)\s*[-_]?\s*(?:16\s*[xX]\s*9|9\s*[xX]\s*16)(?!\d)",
+        r"(?:^|[-_\s])(?:V\d+[-_\s]*)?(6|15|30|60|90)(?:[-_\s]|$)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, stem, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
 
-    if match:
-        return match.group(1)
-
-    match = re.search(
-        r"(?<!\d)(6|15|30|60|90)\s*s(?:ec)?(?!\d)",
-        stem,
-        flags=re.IGNORECASE,
-    )
-
-    return match.group(1) if match else ""
-
+    # Safe final fallback: a standalone known duration number.
+    nums = re.findall(r"(?<!\d)(6|15|30|60|90)(?!\d)", stem)
+    unique = list(dict.fromkeys(nums))
+    return unique[0] if len(unique) == 1 else ""
 
 def creative_aspect_ratio(
     creative_name: str,
@@ -694,51 +690,43 @@ def _infer_url_language(url: str) -> str:
 
 
 def _infer_url_channel(url: str) -> str:
-    """Detect Display / OLV(Video) / CTV / Audio from Anthem tagged URLs."""
-    from urllib.parse import parse_qs, unquote_plus, urlparse
+    """
+    Detect channel from the complete decoded URL.
+    Supports utm_term, utm_content, campaign values and legacy CMP/BRC naming.
+    OLV / Instream / Online Video => Video
+    CTV / Connected TV => CTV
+    """
+    from urllib.parse import unquote_plus
 
-    cleaned = _clean(url).replace("&amp;", "&")
-    decoded = unquote_plus(cleaned)
+    decoded = unquote_plus(_clean(url).replace("&amp;", "&"))
     upper = decoded.upper()
 
-    # Strong explicit markers first.
-    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)CTV(?:[&#]|$)", upper):
+    # CTV first so generic VIDEO wording elsewhere cannot steal a CTV URL.
+    if re.search(r"(?<![A-Z0-9])CTV(?![A-Z0-9])", upper) or "CONNECTED TV" in upper or "CONNECTED_TV" in upper:
         return "CTV"
-    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)(OLV|VIDEO)(?:[&#]|$)", upper):
-        return "Video"
-    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)(DRAD|AUDIO)(?:[&#]|$)", upper):
-        return "Audio"
-    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)(DIS|DISPLAY|BANNER)(?:[&#]|$)", upper):
-        return "Display"
 
-    # Legacy Anthem markers.
-    if "BRC-CTV-" in upper or "CMP=CTV-" in upper:
-        return "CTV"
-    if "BRC-OLV-" in upper or "CMP=OLV-" in upper:
+    if (
+        re.search(r"(?<![A-Z0-9])OLV(?![A-Z0-9])", upper)
+        or "INSTREAM" in upper
+        or "ONLINE VIDEO" in upper
+        or "ONLINE_VIDEO" in upper
+        or "CMP=OLV-" in upper
+        or "BRC-OLV-" in upper
+    ):
         return "Video"
-    if "BRC-DRAD-" in upper or "CMP=DRAD-" in upper:
-        return "Audio"
-    if "BRC-DIS-" in upper or "CMP=DIS-" in upper:
-        return "Display"
 
-    # Parse query parameters case-insensitively.
-    try:
-        params_raw = parse_qs(urlparse(cleaned).query, keep_blank_values=True)
-        params = {str(k).lower(): v for k, v in params_raw.items()}
-        term = " ".join(params.get("utm_term", []) + params.get("term", []))
-        medium = " ".join(params.get("utm_medium", []) + params.get("medium", []))
-    except Exception:
-        term = ""
-        medium = ""
-
-    haystack = unquote_plus(f"{term} {medium}").upper()
-    if re.search(r"(?:^|[^A-Z0-9])CTV(?:[^A-Z0-9]|$)", haystack):
-        return "CTV"
-    if re.search(r"(?:^|[^A-Z0-9])(OLV|VIDEO)(?:[^A-Z0-9]|$)", haystack):
-        return "Video"
-    if re.search(r"(?:^|[^A-Z0-9])(DRAD|AUDIO)(?:[^A-Z0-9]|$)", haystack):
+    if (
+        re.search(r"(?<![A-Z0-9])DRAD(?![A-Z0-9])", upper)
+        or re.search(r"(?<![A-Z0-9])AUDIO(?![A-Z0-9])", upper)
+    ):
         return "Audio"
-    if re.search(r"(?:^|[^A-Z0-9])(DIS|DISPLAY|BANNER)(?:[^A-Z0-9]|$)", haystack):
+
+    if (
+        re.search(r"(?<![A-Z0-9])DISPLAY(?![A-Z0-9])", upper)
+        or re.search(r"(?<![A-Z0-9])DIS(?![A-Z0-9])", upper)
+        or "CMP=DIS-" in upper
+        or "BRC-DIS-" in upper
+    ):
         return "Display"
 
     return ""
@@ -747,23 +735,16 @@ def _infer_url_duration(url: str) -> str:
     from urllib.parse import unquote_plus
     decoded = unquote_plus(_clean(url).replace("&amp;", "&"))
 
-    # Handles 15s, 30s, 15sec, 30seconds, including strings such as
-    # Family15s_16x9 and Benefits30s_16x9.
-    match = re.search(
-        r"(?<!\d)(6|15|30|60|90)\s*(?:s|sec|secs|second|seconds)(?!\d)",
-        decoded,
-        flags=re.IGNORECASE,
-    )
-    if match:
-        return match.group(1)
-
-    # Also support duration values such as duration=15.
-    match = re.search(
+    patterns = [
+        r"(?<!\d)(6|15|30|60|90)\s*[-_]?\s*(?:s|sec|secs|second|seconds)(?![a-z0-9])",
+        r"(?<!\d)(6|15|30|60|90)\s*[-_]?\s*(?:16\s*[xX]\s*9|9\s*[xX]\s*16)(?!\d)",
         r"(?:duration|length|video_length)\s*=\s*(6|15|30|60|90)(?:\D|$)",
-        decoded,
-        flags=re.IGNORECASE,
-    )
-    return match.group(1) if match else ""
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, decoded, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return ""
 
 def parse_url_mapping(
     url_mapping_text: str = "",
