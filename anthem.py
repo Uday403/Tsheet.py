@@ -546,38 +546,28 @@ def _creative_names_from_uploads(
     ))
 
 
-def creative_language(
-    creative_name: str,
-) -> str:
-    """Detect EN/SP from the uploaded creative filename, independent of state."""
-    upper = Path(_clean(creative_name)).name.upper()
-    stem = Path(upper).stem
-    tokens = [t for t in re.split(r"[^A-Z0-9]+", stem) if t]
+def creative_language(creative_name: str) -> str:
+    """Detect EN/SP from both legacy and newer Anthem creative naming."""
+    upper = Path(creative_name).name.upper()
 
-    english_tokens = {"EN", "ENG", "ENGLISH"}
-    spanish_tokens = {"SP", "SPA", "SPANISH", "ESP", "ES"}
-
-    has_en = any(t in english_tokens for t in tokens)
-    has_sp = any(t in spanish_tokens for t in tokens)
-
-    if has_en and not has_sp:
+    # Legacy confirmed Florida markers.
+    if "FLCENSHP" in upper:
         return "EN"
-    if has_sp and not has_en:
+    if "FLCSPSHP" in upper:
         return "SP"
 
-    embedded_en = False
-    embedded_sp = False
-    for token in tokens:
-        if len(token) < 6:
-            continue
-        if re.search(r"[A-Z0-9]EN[A-Z0-9]", token):
-            embedded_en = True
-        if re.search(r"[A-Z0-9]SP[A-Z0-9]", token):
-            embedded_sp = True
+    # Newer compact campaign codes, e.g. KSMENHBL / KSMSPHBL.
+    # MEN = English marker; MSP = Spanish marker. This is state-independent.
+    for token in re.findall(r"[A-Z0-9]+", upper):
+        if "MEN" in token:
+            return "EN"
+        if "MSP" in token:
+            return "SP"
 
-    if embedded_en and not embedded_sp:
+    tokens = re.split(r"[^A-Z0-9]+", upper)
+    if "EN" in tokens or "ENG" in tokens or "ENGLISH" in tokens:
         return "EN"
-    if embedded_sp and not embedded_en:
+    if "SP" in tokens or "SPA" in tokens or "SPANISH" in tokens:
         return "SP"
 
     return ""
@@ -625,6 +615,7 @@ def creative_aspect_ratio(
 def match_anthem_creatives(
     record: dict[str, str],
     creative_names: list[str],
+    creative_language_map: dict[str, str] | None = None,
 ) -> list[str]:
     placement_name = record["_placement_name"]
     language = detect_language(placement_name)
@@ -640,7 +631,8 @@ def match_anthem_creatives(
 
         matches = []
         for name in creative_names:
-            if creative_language(name) != language:
+            detected_language = (creative_language_map or {}).get(name) or creative_language(name)
+            if detected_language != language:
                 continue
             if _extract_dimension(name).lower() != required_dimension.lower():
                 continue
@@ -660,7 +652,8 @@ def match_anthem_creatives(
         for name in creative_names:
             if not name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg")):
                 continue
-            if creative_language(name) != language:
+            detected_language = (creative_language_map or {}).get(name) or creative_language(name)
+            if detected_language != language:
                 continue
             if creative_duration(name) != required_duration:
                 continue
@@ -672,7 +665,8 @@ def match_anthem_creatives(
         for name in creative_names:
             if not name.lower().endswith(".mp4"):
                 continue
-            if creative_language(name) != language:
+            detected_language = (creative_language_map or {}).get(name) or creative_language(name)
+            if detected_language != language:
                 continue
             if creative_duration(name) != required_duration:
                 continue
@@ -877,9 +871,13 @@ def _resolve_dates(
 
 def preview_anthem_setup(
     prisma_file,
-    creative_files,
+    creative_files=None,
     url_mapping_text: str = "",
     url_mapping: dict | None = None,
+    english_creative_files=None,
+    spanish_creative_files=None,
+    english_url_mapping_text: str = "",
+    spanish_url_mapping_text: str = "",
 ) -> dict:
     raw_rows, records = read_prisma_export(
         prisma_file
@@ -888,16 +886,41 @@ def preview_anthem_setup(
         raw_rows
     )
 
-    creative_names = _creative_names_from_uploads(
-        creative_files
-    )
-    url_map = parse_url_mapping(
-        url_mapping_text,
-        url_mapping,
-    )
+    # New preferred workflow: separate English and Spanish upload buckets.
+    # The bucket is the source of truth for language, so filenames do not
+    # need MEN/MSP/EN/SP markers. Legacy combined upload remains supported.
+    en_names = _creative_names_from_uploads(english_creative_files or [])
+    sp_names = _creative_names_from_uploads(spanish_creative_files or [])
+    legacy_names = _creative_names_from_uploads(creative_files or [])
+    creative_names = list(dict.fromkeys(en_names + sp_names + legacy_names))
+    creative_language_map = {name: "EN" for name in en_names}
+    creative_language_map.update({name: "SP" for name in sp_names})
+
+    upload_language_warnings = []
+    for name in en_names:
+        detected = creative_language(name)
+        if detected == "SP":
+            upload_language_warnings.append(f"Wrong upload bucket: {name} looks Spanish but was uploaded under English.")
+    for name in sp_names:
+        detected = creative_language(name)
+        if detected == "EN":
+            upload_language_warnings.append(f"Wrong upload bucket: {name} looks English but was uploaded under Spanish.")
+
+    url_map = parse_url_mapping(url_mapping_text, url_mapping)
+    url_map.update(parse_url_mapping(english_url_mapping_text, { }))
+    # Force language by upload box for raw URLs, regardless of URL wording.
+    for text_value, forced_lang in ((english_url_mapping_text, "EN"), (spanish_url_mapping_text, "SP")):
+        for raw_url in re.findall(r"https?://[^\s<>\"']+", _clean(text_value), flags=re.IGNORECASE):
+            raw_url = raw_url.rstrip(".,);]")
+            channel = _infer_url_channel(raw_url)
+            if not channel:
+                continue
+            duration = _infer_url_duration(raw_url)
+            key = (forced_lang, channel, duration) if duration and channel in ("Video", "CTV", "Audio") else (forced_lang, channel)
+            url_map[key] = raw_url
 
     rows = []
-    warnings = []
+    warnings = list(upload_language_warnings)
     unique_ads: dict[str, dict] = {}
 
     for record in records:
@@ -915,6 +938,7 @@ def preview_anthem_setup(
         matches = match_anthem_creatives(
             record,
             creative_names,
+            creative_language_map,
         )
 
         final_url = _resolve_url(
@@ -1129,6 +1153,7 @@ def _populate_traffic_sheet(
     creative_names: list[str],
     campaign_name: str,
     url_map: dict[tuple[str, str], str],
+    creative_language_map: dict[str, str] | None = None,
     override_start_date=None,
     override_end_date=None,
 ) -> list[str]:
@@ -1186,6 +1211,7 @@ def _populate_traffic_sheet(
         matches = match_anthem_creatives(
             record,
             creative_names,
+            creative_language_map,
         )
 
         start_date, end_date = _resolve_dates(
@@ -1351,6 +1377,7 @@ def _populate_multi_sheet(
     creative_names: list[str],
     campaign_name: str,
     url_map: dict[tuple[str, str], str],
+    creative_language_map: dict[str, str] | None = None,
     override_start_date=None,
     override_end_date=None,
 ) -> list[str]:
@@ -1407,6 +1434,7 @@ def _populate_multi_sheet(
         matches = match_anthem_creatives(
             record,
             creative_names,
+            creative_language_map,
         )
 
         if len(matches) < 2:
@@ -1529,11 +1557,15 @@ def _populate_additional_pixels(
 
 def generate_anthem_tsheet(
     prisma_file,
-    creative_files,
+    creative_files=None,
     url_mapping_text: str = "",
     url_mapping: dict | None = None,
     override_start_date=None,
     override_end_date=None,
+    english_creative_files=None,
+    spanish_creative_files=None,
+    english_url_mapping_text: str = "",
+    spanish_url_mapping_text: str = "",
 ) -> tuple[bytes, list[str]]:
     """
     Generates an Anthem / Elevance traffic sheet.
@@ -1575,19 +1607,28 @@ def generate_anthem_tsheet(
         raw_rows
     )
 
-    creative_names = _creative_names_from_uploads(
-        creative_files
-    )
+    en_names = _creative_names_from_uploads(english_creative_files or [])
+    sp_names = _creative_names_from_uploads(spanish_creative_files or [])
+    legacy_names = _creative_names_from_uploads(creative_files or [])
+    creative_names = list(dict.fromkeys(en_names + sp_names + legacy_names))
+    creative_language_map = {name: "EN" for name in en_names}
+    creative_language_map.update({name: "SP" for name in sp_names})
 
     if not creative_names:
         raise ValueError(
-            "No creative files were found in the uploaded files/ZIPs."
+            "No creative files were found in the English/Spanish uploads."
         )
 
-    url_map = parse_url_mapping(
-        url_mapping_text=url_mapping_text,
-        url_mapping=url_mapping,
-    )
+    url_map = parse_url_mapping(url_mapping_text=url_mapping_text, url_mapping=url_mapping)
+    for text_value, forced_lang in ((english_url_mapping_text, "EN"), (spanish_url_mapping_text, "SP")):
+        for raw_url in re.findall(r"https?://[^\s<>\"']+", _clean(text_value), flags=re.IGNORECASE):
+            raw_url = raw_url.rstrip(".,);]")
+            channel = _infer_url_channel(raw_url)
+            if not channel:
+                continue
+            duration = _infer_url_duration(raw_url)
+            key = (forced_lang, channel, duration) if duration and channel in ("Video", "CTV", "Audio") else (forced_lang, channel)
+            url_map[key] = raw_url
 
     workbook = load_workbook(
         MASTER_TEMPLATE,
@@ -1622,6 +1663,7 @@ def generate_anthem_tsheet(
             creative_names=creative_names,
             campaign_name=campaign_name,
             url_map=url_map,
+            creative_language_map=creative_language_map,
             override_start_date=override_start_date,
             override_end_date=override_end_date,
         )
@@ -1634,6 +1676,7 @@ def generate_anthem_tsheet(
             creative_names=creative_names,
             campaign_name=campaign_name,
             url_map=url_map,
+            creative_language_map=creative_language_map,
             override_start_date=override_start_date,
             override_end_date=override_end_date,
         )
