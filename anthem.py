@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import load_workbook
-from openpyxl.utils.datetime import from_excel
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -325,14 +324,6 @@ def detect_channel(record: dict[str, str]) -> str:
         return "CTV"
 
     if (
-        "digital radio" in combined
-        or "digital audio" in combined
-        or "audio" in combined
-        or "drad" in combined
-    ):
-        return "Audio"
-
-    if (
         "video" in combined
         or "instream" in combined
         or "olv" in combined
@@ -555,30 +546,31 @@ def _creative_names_from_uploads(
     ))
 
 
-def creative_language(
-    creative_name: str,
-) -> str:
-    upper = creative_name.upper()
+def creative_language(creative_name: str) -> str:
+    """Detect EN/SP from both legacy and newer Anthem creative naming."""
+    upper = Path(creative_name).name.upper()
 
-    # Explicit campaign markers confirmed from supplied files.
+    # Legacy confirmed Florida markers.
     if "FLCENSHP" in upper:
         return "EN"
-
     if "FLCSPSHP" in upper:
         return "SP"
 
-    # Generic fallback for future state campaigns where filenames
-    # explicitly contain language.
+    # Newer compact campaign codes, e.g. KSMENHBL / KSMSPHBL.
+    # MEN = English marker; MSP = Spanish marker. This is state-independent.
+    for token in re.findall(r"[A-Z0-9]+", upper):
+        if "MEN" in token:
+            return "EN"
+        if "MSP" in token:
+            return "SP"
+
     tokens = re.split(r"[^A-Z0-9]+", upper)
-
-    if "EN" in tokens or "ENGLISH" in tokens:
+    if "EN" in tokens or "ENG" in tokens or "ENGLISH" in tokens:
         return "EN"
-
-    if "SP" in tokens or "SPANISH" in tokens:
+    if "SP" in tokens or "SPA" in tokens or "SPANISH" in tokens:
         return "SP"
 
     return ""
-
 
 def creative_duration(
     creative_name: str,
@@ -631,261 +623,212 @@ def match_anthem_creatives(
     if not language or not channel:
         return []
 
-    # DISPLAY
     if channel == "Display":
         required_dimension = placement_dimension(record)
-
         if not required_dimension:
             return []
 
         matches = []
-
         for name in creative_names:
             if creative_language(name) != language:
                 continue
-
             if _extract_dimension(name).lower() != required_dimension.lower():
                 continue
-
             if not name.lower().endswith(
                 (".zip", ".jpg", ".jpeg", ".png", ".gif", ".webp")
             ):
                 continue
-
             matches.append(name)
-
         return matches
 
-    required_duration = detect_video_duration(
-        placement_name
-    )
-
+    required_duration = detect_video_duration(placement_name)
     if not required_duration:
         return []
 
-    # AUDIO
-    # Never allow OLV/CTV MP4 creatives to be adopted by Audio placements.
-    # Audio placements may only match actual audio-file formats.
     if channel == "Audio":
-        audio_extensions = (
-            ".mp3",
-            ".wav",
-            ".m4a",
-            ".aac",
-            ".ogg",
-        )
-
         matches = []
-
         for name in creative_names:
-            if not name.lower().endswith(audio_extensions):
+            if not name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg")):
                 continue
-
             if creative_language(name) != language:
                 continue
-
             if creative_duration(name) != required_duration:
                 continue
-
             matches.append(name)
-
         return matches
 
-    # VIDEO / CTV
-    # Only actual video files are eligible.
     if channel in ("Video", "CTV"):
         matches = []
-
         for name in creative_names:
             if not name.lower().endswith(".mp4"):
                 continue
-
             if creative_language(name) != language:
                 continue
-
             if creative_duration(name) != required_duration:
                 continue
-
-            # Existing Anthem OLV/CTV trafficking uses 16x9 assets.
             aspect = creative_aspect_ratio(name)
-
             if aspect and aspect != "16x9":
                 continue
-
             matches.append(name)
-
         return matches
 
     return []
 
 def _infer_url_language(url: str) -> str:
-    """
-    Anthem rule:
-      /es/ in URL -> Spanish
-      otherwise   -> English
-    """
-    return "SP" if "/es/" in url.lower() else "EN"
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(url).lower()
+    if "/es/" in decoded:
+        return "SP"
+    if re.search(r"(?:^|[^a-z0-9])(spanish|espanol|español)(?:[^a-z0-9]|$)", decoded):
+        return "SP"
+    return "EN"
 
 
 def _infer_url_channel(url: str) -> str:
-    """
-    Anthem CMP rules:
-      DIS  -> Display
-      OLV  -> Video
-      CTV  -> CTV
-      DRAD -> Audio
-    """
-    upper = url.upper()
+    """Recognize both legacy CMP/BRC URLs and newer utm_term URLs."""
+    from urllib.parse import parse_qs, unquote_plus, urlparse
+
+    decoded = unquote_plus(url)
+    upper = decoded.upper()
 
     if re.search(r"(?:[?&]CMP=|[-_])DIS-", upper):
         return "Display"
-
     if "BRC-OLV-" in upper or "CMP=OLV-" in upper:
         return "Video"
-
     if "BRC-CTV-" in upper or "CMP=CTV-" in upper:
         return "CTV"
-
     if "BRC-DRAD-" in upper or "CMP=DRAD-" in upper:
         return "Audio"
 
+    try:
+        params = parse_qs(urlparse(url).query)
+        term = " ".join(params.get("utm_term", []))
+        medium = " ".join(params.get("utm_medium", []))
+    except Exception:
+        term = ""
+        medium = ""
+
+    haystack = f"{term} {medium}".upper()
+    if re.search(r"(?:^|[^A-Z0-9])CTV(?:[^A-Z0-9]|$)", haystack):
+        return "CTV"
+    if re.search(r"(?:^|[^A-Z0-9])(OLV|VIDEO)(?:[^A-Z0-9]|$)", haystack):
+        return "Video"
+    if re.search(r"(?:^|[^A-Z0-9])(DRAD|AUDIO)(?:[^A-Z0-9]|$)", haystack):
+        return "Audio"
+    if re.search(r"(?:^|[^A-Z0-9])(DIS|DISPLAY|BANNER)(?:[^A-Z0-9]|$)", haystack):
+        return "Display"
     return ""
+
+
+def _infer_url_duration(url: str) -> str:
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(url)
+    match = re.search(
+        r"(?<!\d)(6|15|30|60|90)\s*s(?:ec(?:ond)?s?)?(?!\d)",
+        decoded,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
 
 
 def parse_url_mapping(
     url_mapping_text: str = "",
     url_mapping: dict | None = None,
-) -> dict[tuple[str, str], str]:
+) -> dict:
+    """Parse old explicit mappings and raw Anthem URLs.
+
+    Most-specific keys use (language, channel, duration). Broad fallback keys
+    use (language, channel), preventing 15s and 30s URLs from overwriting one
+    another when the UTM contains a duration.
     """
-    The user may simply paste Anthem URLs, one per line.
+    result = {}
+    channel_lookup = {
+        "DISPLAY": "Display", "DIS": "Display",
+        "VIDEO": "Video", "OLV": "Video",
+        "CTV": "CTV", "AUDIO": "Audio", "DRAD": "Audio",
+    }
 
-    Mapping is automatic:
-      /es/ -> SP, otherwise EN
-      DIS  -> Display
-      OLV  -> Video
-      CTV  -> CTV
-      DRAD -> Audio
-
-    This parser deliberately extracts URLs from anywhere in the pasted
-    text, so leading bullets, spaces, numbering, or Excel paste artifacts
-    do not prevent mapping.
-    """
-    result: dict[tuple[str, str], str] = {}
-
-    # Keep backward compatibility with a supplied dict.
     if url_mapping:
         for key, value in url_mapping.items():
-            if not (isinstance(key, tuple) and len(key) == 2):
+            if not isinstance(key, tuple) or len(key) not in (2, 3):
                 continue
-
             language = str(key[0]).upper().strip()
-            channel_raw = str(key[1]).strip().upper()
-
-            channel_lookup = {
-                "DISPLAY": "Display",
-                "DIS": "Display",
-                "VIDEO": "Video",
-                "OLV": "Video",
-                "CTV": "CTV",
-                "AUDIO": "Audio",
-                "DRAD": "Audio",
-            }
-
-            channel = channel_lookup.get(channel_raw, "")
+            channel = channel_lookup.get(str(key[1]).upper().strip(), "")
             cleaned_url = _clean(value)
-
-            if (
-                language in ("EN", "SP")
-                and channel
-                and cleaned_url
-            ):
+            if language not in ("EN", "SP") or not channel or not cleaned_url:
+                continue
+            if len(key) == 3 and _clean(key[2]):
+                result[(language, channel, str(key[2]).strip())] = cleaned_url
+            else:
                 result[(language, channel)] = cleaned_url
 
-    pasted_text = _clean(url_mapping_text)
+    pasted = _clean(url_mapping_text)
 
-    # Extract every HTTP/HTTPS URL, regardless of line formatting.
-    urls = re.findall(
-        r'https?://[^\s<>"\']+',
-        pasted_text,
-        flags=re.IGNORECASE,
-    )
+    # Preserve manual EN<TAB>Channel<TAB>URL / pipe format.
+    for line in pasted.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            parts = line.split("|")
+        if len(parts) >= 3:
+            language = parts[0].strip().upper()
+            channel = channel_lookup.get(parts[1].strip().upper(), "")
+            url = ("\t" if "\t" in line else "|").join(parts[2:]).strip()
+            if language in ("EN", "SP") and channel and url:
+                duration = _infer_url_duration(url)
+                if duration and channel in ("Video", "CTV", "Audio"):
+                    result[(language, channel, duration)] = url
+                else:
+                    result[(language, channel)] = url
 
+    # Also accept URLs pasted by themselves or copied from Excel/text.
+    urls = re.findall(r"https?://[^\s<>\"']+", pasted, flags=re.IGNORECASE)
     for url in urls:
-        # Remove punctuation that may be copied after a URL.
         url = url.rstrip(".,);]")
-
         language = _infer_url_language(url)
         channel = _infer_url_channel(url)
-
-        if channel:
+        if not channel:
+            continue
+        duration = _infer_url_duration(url)
+        if duration and channel in ("Video", "CTV", "Audio"):
+            result[(language, channel, duration)] = url
+        else:
             result[(language, channel)] = url
 
     return result
 
+
 def _resolve_url(
     record: dict[str, str],
-    url_map: dict[tuple[str, str], str],
+    url_map: dict,
 ) -> str:
-    language = detect_language(
-        record["_placement_name"]
-    )
+    language = detect_language(record["_placement_name"])
     channel = detect_channel(record)
+    duration = detect_video_duration(record["_placement_name"])
 
-    return _clean(
-        url_map.get((language, channel), "")
-    )
+    if duration:
+        specific = _clean(url_map.get((language, channel, duration), ""))
+        if specific:
+            return specific
 
+    return _clean(url_map.get((language, channel), ""))
 
 def _to_excel_date_or_text(value):
-    """
-    Normalize every supported date source to a real Python datetime.
-
-    Handles:
-    - existing datetime/date values
-    - Excel serial dates such as 46273 / 46387
-    - numeric serials stored as text
-    - mm/dd/yyyy
-    - mm-dd-yyyy
-    - dd-mm-yyyy
-    - dd/mm/yyyy
-    - yyyy-mm-dd
-    - yyyy/mm/dd
-    - yyyy-mm-dd HH:MM:SS
-    """
     if value is None:
         return ""
 
-    # Already a real date/datetime.
     if isinstance(value, datetime):
         return value
-
-    # Excel serial supplied as int/float.
-    if isinstance(value, (int, float)):
-        try:
-            return from_excel(value)
-        except Exception:
-            return value
 
     value = _clean(value)
 
     if not value:
         return ""
 
-    # Excel serial supplied as text, e.g. "46273" or "46273.0".
-    if re.fullmatch(r"\d+(?:\.0+)?", value):
-        try:
-            serial = float(value)
-            # Normal modern Excel dates are safely in this range.
-            if 1 <= serial <= 100000:
-                return from_excel(serial)
-        except Exception:
-            pass
-
     for fmt in (
         "%m/%d/%Y",
         "%m-%d-%Y",
-        "%d-%m-%Y",
-        "%d/%m/%Y",
         "%Y-%m-%d",
         "%Y/%m/%d",
         "%Y-%m-%d %H:%M:%S",
@@ -896,6 +839,7 @@ def _to_excel_date_or_text(value):
             pass
 
     return value
+
 
 def _resolve_dates(
     record: dict[str, str],
@@ -1179,11 +1123,6 @@ def _populate_traffic_sheet(
     override_end_date=None,
 ) -> list[str]:
     sheet = workbook[TRAFFIC_SHEET]
-
-    # Anthem Traffic_Doc campaign header.
-    # B2 must reflect the campaign name read from the Prisma export.
-    sheet["B2"] = campaign_name
-
     _, first_data_row = _find_traffic_layout(
         sheet
     )
@@ -1322,19 +1261,15 @@ def _populate_traffic_sheet(
             column=12,
         ).value = "N"
 
-        start_cell = sheet.cell(
+        sheet.cell(
             row=row,
             column=14,
-        )
-        start_cell.value = start_date
-        start_cell.number_format = "dd-mm-yyyy"
+        ).value = start_date
 
-        end_cell = sheet.cell(
+        sheet.cell(
             row=row,
             column=15,
-        )
-        end_cell.value = end_date
-        end_cell.number_format = "dd-mm-yyyy"
+        ).value = end_date
 
         if len(matches) == 0:
             sheet.cell(
@@ -1400,39 +1335,6 @@ def _populate_traffic_sheet(
     return warnings
 
 
-def _find_header_column(
-    sheet,
-    *header_candidates: str,
-) -> int:
-    """
-    Find a column by the actual header text in row 1.
-    This avoids column-shift problems when account templates differ.
-    """
-    normalized_candidates = {
-        _normalize(candidate)
-        for candidate in header_candidates
-    }
-
-    for column in range(1, sheet.max_column + 1):
-        header = _normalize(
-            sheet.cell(
-                row=1,
-                column=column,
-            ).value
-        )
-
-        if not header:
-            continue
-
-        if header in normalized_candidates:
-            return column
-
-    raise ValueError(
-        "Could not find Multi-tab column for: "
-        + " / ".join(header_candidates)
-    )
-
-
 def _populate_multi_sheet(
     workbook,
     records: list[dict[str, str]],
@@ -1446,78 +1348,9 @@ def _populate_multi_sheet(
 
     first_data_row = 2
     max_column = max(
-        sheet.max_column,
         16,
+        min(sheet.max_column, 24),
     )
-
-    # IMPORTANT:
-    # Do not hardcode C/D/E/etc. Use the headers in master_template.xlsm.
-    # Current shared master has:
-    # A = AD Name
-    # B = Trafficking Notes
-    # C = Creative File Name
-    # D = Studio Creative? (Y/N)
-    # E = Rotation %
-    # F = Start Date
-    # G = End Date
-    # H = Click through URL
-    ad_col = _find_header_column(
-        sheet,
-        "AD Name",
-        "Ad Name",
-    )
-
-    notes_col = _find_header_column(
-        sheet,
-        "Trafficking Notes",
-    )
-
-    creative_col = _find_header_column(
-        sheet,
-        "Creative File Name",
-    )
-
-    studio_col = _find_header_column(
-        sheet,
-        "Studio Creative? (Y/N)",
-        "Studio Creative (Y/N)",
-    )
-
-    rotation_col = _find_header_column(
-        sheet,
-        "Rotation %",
-        'Rotation % (or "Even")',
-        "Rotation",
-    )
-
-    start_col = _find_header_column(
-        sheet,
-        "Start Date",
-    )
-
-    end_col = _find_header_column(
-        sheet,
-        "End Date",
-    )
-
-    # Click-through header has extra wording in some versions.
-    url_col = None
-    for column in range(1, sheet.max_column + 1):
-        header = _normalize(
-            sheet.cell(
-                row=1,
-                column=column,
-            ).value
-        )
-
-        if header.startswith("clickthroughurl"):
-            url_col = column
-            break
-
-    if url_col is None:
-        raise ValueError(
-            "Could not find Click through URL column in Multi tab."
-        )
 
     style_snapshot = _snapshot_row_format(
         sheet,
@@ -1525,6 +1358,7 @@ def _populate_multi_sheet(
         max_column,
     )
 
+    # Remove old merged rows below header if template contains any.
     for merged_range in list(
         sheet.merged_cells.ranges
     ):
@@ -1546,7 +1380,8 @@ def _populate_multi_sheet(
     warnings = []
     output_row = first_data_row
 
-    # One creative block per unique Ad Name.
+    # The same Anthem Ad Name can be used by many placements/tactics.
+    # Multi tab should contain the creative set only once per unique Ad.
     ad_blocks: dict[str, dict] = {}
 
     for record in records:
@@ -1564,7 +1399,6 @@ def _populate_multi_sheet(
             creative_names,
         )
 
-        # Multi tab is used only where an Ad has 2+ matching creatives.
         if len(matches) < 2:
             continue
 
@@ -1577,20 +1411,21 @@ def _populate_multi_sheet(
             override_end_date,
         )
 
-        final_url = _resolve_url(
-            record,
-            url_map,
-        )
-
         ad_blocks[ad_name] = {
+            "record": record,
             "matches": matches,
             "start_date": start_date,
             "end_date": end_date,
-            "url": final_url,
+            "url": _resolve_url(
+                record,
+                url_map,
+            ),
         }
 
     for ad_name, block in ad_blocks.items():
-        for creative_name in block["matches"]:
+        for creative_name in block[
+            "matches"
+        ]:
             _apply_row_format(
                 sheet,
                 output_row,
@@ -1599,48 +1434,43 @@ def _populate_multi_sheet(
 
             sheet.cell(
                 row=output_row,
-                column=ad_col,
+                column=1,
             ).value = ad_name
 
             sheet.cell(
                 row=output_row,
-                column=notes_col,
-            ).value = ""
+                column=2,
+            ).value = "New"
 
-            # This now writes under the ACTUAL "Creative File Name" header.
-            # In the current master_template.xlsm this is column C.
             sheet.cell(
                 row=output_row,
-                column=creative_col,
+                column=4,
             ).value = creative_name
 
             sheet.cell(
                 row=output_row,
-                column=studio_col,
+                column=5,
             ).value = "N"
 
+            # Supplied Anthem sheet uses text "Even", not 50%.
             sheet.cell(
                 row=output_row,
-                column=rotation_col,
+                column=6,
             ).value = "Even"
 
-            start_cell = sheet.cell(
+            sheet.cell(
                 row=output_row,
-                column=start_col,
-            )
-            start_cell.value = block["start_date"]
-            start_cell.number_format = "dd-mm-yyyy"
-
-            end_cell = sheet.cell(
-                row=output_row,
-                column=end_col,
-            )
-            end_cell.value = block["end_date"]
-            end_cell.number_format = "dd-mm-yyyy"
+                column=7,
+            ).value = block["start_date"]
 
             sheet.cell(
                 row=output_row,
-                column=url_col,
+                column=8,
+            ).value = block["end_date"]
+
+            sheet.cell(
+                row=output_row,
+                column=9,
             ).value = block["url"]
 
             output_row += 1
@@ -1651,6 +1481,7 @@ def _populate_multi_sheet(
             )
 
     return warnings
+
 
 def _populate_additional_pixels(
     workbook,
@@ -1747,14 +1578,6 @@ def generate_anthem_tsheet(
         url_mapping_text=url_mapping_text,
         url_mapping=url_mapping,
     )
-
-    # Do not silently generate a sheet when pasted Anthem URLs were not
-    # understood. This catches deployment/input issues immediately.
-    if url_mapping_text and not url_map:
-        raise ValueError(
-            "Anthem URLs were pasted, but none could be mapped. "
-            "Expected CMP markers DIS, CTV, OLV or DRAD."
-        )
 
     workbook = load_workbook(
         MASTER_TEMPLATE,
