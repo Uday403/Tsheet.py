@@ -660,7 +660,12 @@ def match_anthem_creatives(
             matches.append(name)
         return matches
 
-    if channel in ("Video", "CTV"):
+    # Uploaded MP4 creatives are OLV / Video assets only.
+    # Do NOT map them to CTV placements.
+    if channel == "CTV":
+        return []
+
+    if channel == "Video":
         matches = []
         for name in creative_names:
             if not name.lower().endswith(".mp4"):
@@ -689,30 +694,44 @@ def _infer_url_language(url: str) -> str:
 
 
 def _infer_url_channel(url: str) -> str:
-    """Recognize both legacy CMP/BRC URLs and newer utm_term URLs."""
+    """Detect Display / OLV(Video) / CTV / Audio from Anthem tagged URLs."""
     from urllib.parse import parse_qs, unquote_plus, urlparse
 
-    decoded = unquote_plus(url)
+    cleaned = _clean(url).replace("&amp;", "&")
+    decoded = unquote_plus(cleaned)
     upper = decoded.upper()
 
-    if re.search(r"(?:[?&]CMP=|[-_])DIS-", upper):
-        return "Display"
-    if "BRC-OLV-" in upper or "CMP=OLV-" in upper:
+    # Strong explicit markers first.
+    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)CTV(?:[&#]|$)", upper):
+        return "CTV"
+    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)(OLV|VIDEO)(?:[&#]|$)", upper):
         return "Video"
+    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)(DRAD|AUDIO)(?:[&#]|$)", upper):
+        return "Audio"
+    if re.search(r"(?:[?&]UTM_TERM=|[?&]TERM=)(DIS|DISPLAY|BANNER)(?:[&#]|$)", upper):
+        return "Display"
+
+    # Legacy Anthem markers.
     if "BRC-CTV-" in upper or "CMP=CTV-" in upper:
         return "CTV"
+    if "BRC-OLV-" in upper or "CMP=OLV-" in upper:
+        return "Video"
     if "BRC-DRAD-" in upper or "CMP=DRAD-" in upper:
         return "Audio"
+    if "BRC-DIS-" in upper or "CMP=DIS-" in upper:
+        return "Display"
 
+    # Parse query parameters case-insensitively.
     try:
-        params = parse_qs(urlparse(url).query)
-        term = " ".join(params.get("utm_term", []))
-        medium = " ".join(params.get("utm_medium", []))
+        params_raw = parse_qs(urlparse(cleaned).query, keep_blank_values=True)
+        params = {str(k).lower(): v for k, v in params_raw.items()}
+        term = " ".join(params.get("utm_term", []) + params.get("term", []))
+        medium = " ".join(params.get("utm_medium", []) + params.get("medium", []))
     except Exception:
         term = ""
         medium = ""
 
-    haystack = f"{term} {medium}".upper()
+    haystack = unquote_plus(f"{term} {medium}").upper()
     if re.search(r"(?:^|[^A-Z0-9])CTV(?:[^A-Z0-9]|$)", haystack):
         return "CTV"
     if re.search(r"(?:^|[^A-Z0-9])(OLV|VIDEO)(?:[^A-Z0-9]|$)", haystack):
@@ -721,19 +740,30 @@ def _infer_url_channel(url: str) -> str:
         return "Audio"
     if re.search(r"(?:^|[^A-Z0-9])(DIS|DISPLAY|BANNER)(?:[^A-Z0-9]|$)", haystack):
         return "Display"
-    return ""
 
+    return ""
 
 def _infer_url_duration(url: str) -> str:
     from urllib.parse import unquote_plus
-    decoded = unquote_plus(url)
+    decoded = unquote_plus(_clean(url).replace("&amp;", "&"))
+
+    # Handles 15s, 30s, 15sec, 30seconds, including strings such as
+    # Family15s_16x9 and Benefits30s_16x9.
     match = re.search(
-        r"(?<!\d)(6|15|30|60|90)\s*s(?:ec(?:ond)?s?)?(?!\d)",
+        r"(?<!\d)(6|15|30|60|90)\s*(?:s|sec|secs|second|seconds)(?!\d)",
+        decoded,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+
+    # Also support duration values such as duration=15.
+    match = re.search(
+        r"(?:duration|length|video_length)\s*=\s*(6|15|30|60|90)(?:\D|$)",
         decoded,
         flags=re.IGNORECASE,
     )
     return match.group(1) if match else ""
-
 
 def parse_url_mapping(
     url_mapping_text: str = "",
@@ -946,7 +976,7 @@ def preview_anthem_setup(
             url_map,
         )
 
-        if not matches:
+        if not matches and detect_channel(record) != "CTV":
             warnings.append(
                 "No Anthem creative matched: "
                 f"{placement_name}"
@@ -1579,8 +1609,11 @@ def generate_anthem_tsheet(
     Display matching:
       Language + exact dimension
 
-    Video/CTV matching:
+    Video/OLV matching:
       Language + duration + 16x9
+
+    CTV:
+      Uploaded OLV MP4 creatives are not mapped to CTV.
 
     URL mapping:
       one URL for each Language + Channel combination.
