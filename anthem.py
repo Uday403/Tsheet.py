@@ -546,28 +546,38 @@ def _creative_names_from_uploads(
     ))
 
 
-def creative_language(creative_name: str) -> str:
-    """Detect EN/SP from both legacy and newer Anthem creative naming."""
-    upper = Path(creative_name).name.upper()
+def creative_language(
+    creative_name: str,
+) -> str:
+    """Detect EN/SP from the uploaded creative filename, independent of state."""
+    upper = Path(_clean(creative_name)).name.upper()
+    stem = Path(upper).stem
+    tokens = [t for t in re.split(r"[^A-Z0-9]+", stem) if t]
 
-    # Legacy confirmed Florida markers.
-    if "FLCENSHP" in upper:
+    english_tokens = {"EN", "ENG", "ENGLISH"}
+    spanish_tokens = {"SP", "SPA", "SPANISH", "ESP", "ES"}
+
+    has_en = any(t in english_tokens for t in tokens)
+    has_sp = any(t in spanish_tokens for t in tokens)
+
+    if has_en and not has_sp:
         return "EN"
-    if "FLCSPSHP" in upper:
+    if has_sp and not has_en:
         return "SP"
 
-    # Newer compact campaign codes, e.g. KSMENHBL / KSMSPHBL.
-    # MEN = English marker; MSP = Spanish marker. This is state-independent.
-    for token in re.findall(r"[A-Z0-9]+", upper):
-        if "MEN" in token:
-            return "EN"
-        if "MSP" in token:
-            return "SP"
+    embedded_en = False
+    embedded_sp = False
+    for token in tokens:
+        if len(token) < 6:
+            continue
+        if re.search(r"[A-Z0-9]EN[A-Z0-9]", token):
+            embedded_en = True
+        if re.search(r"[A-Z0-9]SP[A-Z0-9]", token):
+            embedded_sp = True
 
-    tokens = re.split(r"[^A-Z0-9]+", upper)
-    if "EN" in tokens or "ENG" in tokens or "ENGLISH" in tokens:
+    if embedded_en and not embedded_sp:
         return "EN"
-    if "SP" in tokens or "SPA" in tokens or "SPANISH" in tokens:
+    if embedded_sp and not embedded_en:
         return "SP"
 
     return ""
