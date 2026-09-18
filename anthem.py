@@ -1385,17 +1385,112 @@ def _populate_multi_sheet(
     records: list[dict[str, str]],
     creative_names: list[str],
     campaign_name: str,
-    url_map: dict[tuple[str, str], str],
+    url_map: dict,
     creative_language_map: dict[str, str] | None = None,
     override_start_date=None,
     override_end_date=None,
 ) -> list[str]:
+    """
+    Populate Anthem Multi-Ad using the ACTUAL template headers instead of
+    hard-coded Excel column numbers.
+
+    This prevents the one-column shift seen when:
+      Creative File Name was written in D instead of C,
+      Studio Creative in E instead of D,
+      Rotation in F instead of E,
+      Start Date in G instead of F,
+      End Date in H instead of G,
+      URL in I instead of H.
+    """
     sheet = workbook[MULTI_SHEET]
 
-    first_data_row = 2
+    def norm(value):
+        return " ".join(
+            _clean(value)
+            .replace("\n", " ")
+            .replace("\r", " ")
+            .lower()
+            .split()
+        )
+
+    # Locate the Multi-Ad header row dynamically.
+    header_row = None
+    header_map = {}
+
+    for r in range(1, min(sheet.max_row, 25) + 1):
+        row_headers = {}
+        for c in range(1, min(max(sheet.max_column, 12), 30) + 1):
+            value = norm(sheet.cell(row=r, column=c).value)
+            if value:
+                row_headers[value] = c
+
+        has_creative = any("creative file name" in h for h in row_headers)
+        has_rotation = any("rotation" in h for h in row_headers)
+        has_start = any("start date" in h for h in row_headers)
+        has_end = any("end date" in h for h in row_headers)
+
+        if has_creative and has_rotation and has_start and has_end:
+            header_row = r
+            header_map = row_headers
+            break
+
+    if header_row is None:
+        raise ValueError(
+            "Unable to locate Multi-Ad headers. Expected headers such as "
+            "'Creative File Name', 'Rotation %', 'Start Date', and 'End Date'."
+        )
+
+    def find_col(*phrases, required=True):
+        normalized_phrases = [norm(p) for p in phrases]
+
+        # Exact match first.
+        for phrase in normalized_phrases:
+            if phrase in header_map:
+                return header_map[phrase]
+
+        # Then contains-match for headers with extra instructions in brackets.
+        for header, col in header_map.items():
+            if any(phrase in header for phrase in normalized_phrases):
+                return col
+
+        if required:
+            raise ValueError(
+                "Unable to locate Multi-Ad column: "
+                + " / ".join(phrases)
+            )
+        return None
+
+    # Resolve every important column from its header.
+    ad_name_col = find_col("Ad Name", "Ad", required=False)
+    action_col = find_col("Action", required=False)
+    creative_col = find_col("Creative File Name")
+    studio_col = find_col("Studio Creative? (Y/N)", "Studio Creative")
+    rotation_col = find_col("Rotation %", "Rotation")
+    start_col = find_col("Start Date")
+    end_col = find_col("End Date")
+    url_col = find_col(
+        "Click through URL",
+        "Click Through URL",
+        "Clickthrough URL",
+    )
+
+    # Preserve legacy Anthem template defaults if Ad/Action headers are not
+    # detectable. The content columns above NEVER use fixed positions.
+    if ad_name_col is None:
+        ad_name_col = 1
+    if action_col is None:
+        action_col = 2
+
+    first_data_row = header_row + 1
     max_column = max(
-        16,
-        min(sheet.max_column, 24),
+        sheet.max_column,
+        url_col,
+        creative_col,
+        studio_col,
+        rotation_col,
+        start_col,
+        end_col,
+        12,
     )
 
     style_snapshot = _snapshot_row_format(
@@ -1404,14 +1499,10 @@ def _populate_multi_sheet(
         max_column,
     )
 
-    # Remove old merged rows below header if template contains any.
-    for merged_range in list(
-        sheet.merged_cells.ranges
-    ):
+    # Remove old merged rows below the header if the template contains any.
+    for merged_range in list(sheet.merged_cells.ranges):
         if merged_range.min_row >= first_data_row:
-            sheet.unmerge_cells(
-                str(merged_range)
-            )
+            sheet.unmerge_cells(str(merged_range))
 
     old_max_row = sheet.max_row
 
@@ -1426,16 +1517,13 @@ def _populate_multi_sheet(
     warnings = []
     output_row = first_data_row
 
-    # The same Anthem Ad Name can be used by many placements/tactics.
-    # Multi tab should contain the creative set only once per unique Ad.
+    # Same Anthem Ad Name may occur on many Prisma tactic rows.
+    # Write its creative set once in Multi-Ad.
     ad_blocks: dict[str, dict] = {}
 
     for record in records:
         try:
-            ad_name = build_anthem_ad_name(
-                record,
-                campaign_name,
-            )
+            ad_name = build_anthem_ad_name(record, campaign_name)
         except ValueError as exc:
             warnings.append(str(exc))
             continue
@@ -1459,66 +1547,28 @@ def _populate_multi_sheet(
         )
 
         ad_blocks[ad_name] = {
-            "record": record,
             "matches": matches,
             "start_date": start_date,
             "end_date": end_date,
-            "url": _resolve_url(
-                record,
-                url_map,
-            ),
+            "url": _resolve_url(record, url_map),
         }
 
     for ad_name, block in ad_blocks.items():
-        for creative_name in block[
-            "matches"
-        ]:
+        for creative_name in block["matches"]:
             _apply_row_format(
                 sheet,
                 output_row,
                 style_snapshot,
             )
 
-            sheet.cell(
-                row=output_row,
-                column=1,
-            ).value = ad_name
-
-            sheet.cell(
-                row=output_row,
-                column=2,
-            ).value = "New"
-
-            sheet.cell(
-                row=output_row,
-                column=4,
-            ).value = creative_name
-
-            sheet.cell(
-                row=output_row,
-                column=5,
-            ).value = "N"
-
-            # Supplied Anthem sheet uses text "Even", not 50%.
-            sheet.cell(
-                row=output_row,
-                column=6,
-            ).value = "Even"
-
-            sheet.cell(
-                row=output_row,
-                column=7,
-            ).value = block["start_date"]
-
-            sheet.cell(
-                row=output_row,
-                column=8,
-            ).value = block["end_date"]
-
-            sheet.cell(
-                row=output_row,
-                column=9,
-            ).value = block["url"]
+            sheet.cell(output_row, ad_name_col).value = ad_name
+            sheet.cell(output_row, action_col).value = "New"
+            sheet.cell(output_row, creative_col).value = creative_name
+            sheet.cell(output_row, studio_col).value = "N"
+            sheet.cell(output_row, rotation_col).value = "Even"
+            sheet.cell(output_row, start_col).value = block["start_date"]
+            sheet.cell(output_row, end_col).value = block["end_date"]
+            sheet.cell(output_row, url_col).value = block["url"]
 
             output_row += 1
 
@@ -1528,7 +1578,6 @@ def _populate_multi_sheet(
             )
 
     return warnings
-
 
 def _populate_additional_pixels(
     workbook,
