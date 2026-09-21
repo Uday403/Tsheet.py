@@ -19,6 +19,14 @@ from brooks import (
     generate_brooks_tsheet,
     preview_brooks_setup,
 )
+from bfas import (
+    generate_bfas_tsheet,
+    preview_bfas_setup,
+)
+from coned import (
+    generate_coned_tsheet,
+    preview_coned_setup,
+)
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 from simon_vip import (
@@ -35,6 +43,7 @@ ACCOUNT_NAMES = [
     "Simon VIP",
     "Anthem / Elevance",
     "Brooks",
+    "BFAS",
     "UPS Store",
     "Hyatt",
     "USTA",
@@ -981,357 +990,107 @@ elif selected_account == "AAA":
 # ============================================================
 
 elif selected_account == "Anthem / Elevance":
-    st.success(
-        "Anthem / Elevance automation is ready."
-    )
-
+    st.success("Anthem / Elevance automation is ready.")
     st.info(
-        "Upload the Prisma CSV and Anthem "
-        "creative files/ZIPs. One creative "
-        "goes directly to Traffic_Doc; two "
-        "or more matching creatives go to "
-        "the Multi-Ad or Creative Rotation "
-        "tab."
+        "Upload the Prisma CSV, then upload English and Spanish creatives separately. "
+        "Paste English and Spanish tagged URLs/UTMs in their respective sections. "
+        "One matching creative goes to Traffic_Doc; two or more matching creatives "
+        "go to the Multi-Ad or Creative Rotation tab."
     )
 
-    prisma_file, creative_files = (
-        common_upload_fields(
-            "anthem",
-            allow_zip=True,
+    prisma_file = st.file_uploader(
+        "Upload Prisma CSV", type=["csv", "txt"], key="anthem_prisma"
+    )
+
+    col_en, col_sp = st.columns(2)
+    with col_en:
+        st.subheader("English")
+        english_creative_files = st.file_uploader(
+            "Upload English Creatives",
+            type=["jpg", "jpeg", "png", "gif", "webp", "html", "htm", "mp4", "zip"],
+            accept_multiple_files=True, key="anthem_en_creatives"
         )
-    )
+        english_url_mapping_text = st.text_area(
+            "Paste English UTMs / URLs",
+            placeholder="Paste English tagged URLs, one per line.",
+            height=220, key="anthem_en_urls"
+        )
 
-    url_mapping_text = st.text_area(
-        "Paste Anthem URL Mapping",
-        placeholder=(
-            "Paste the Anthem URLs, one per line.\n"
-            "The dashboard detects the required "
-            "mapping from the URL."
-        ),
-        height=220,
-        key="anthem_url_mapping",
-    )
+    with col_sp:
+        st.subheader("Spanish")
+        spanish_creative_files = st.file_uploader(
+            "Upload Spanish Creatives",
+            type=["jpg", "jpeg", "png", "gif", "webp", "html", "htm", "mp4", "zip"],
+            accept_multiple_files=True, key="anthem_sp_creatives"
+        )
+        spanish_url_mapping_text = st.text_area(
+            "Paste Spanish UTMs / URLs",
+            placeholder="Paste Spanish tagged URLs, one per line.",
+            height=220, key="anthem_sp_urls"
+        )
 
-    override_dates = st.checkbox(
-        "Override Prisma flight dates",
-        value=False,
-        key="anthem_override_dates",
-    )
-
-    override_start_date = None
-    override_end_date = None
-
+    override_dates = st.checkbox("Override Prisma flight dates", value=False, key="anthem_override_dates")
+    override_start_date = override_end_date = None
     if override_dates:
-        col1, col2 = st.columns(2)
-
-        with col1:
-            override_start_date = (
-                st.date_input(
-                    "Start Date",
-                    key="anthem_start_date",
-                )
-            )
-
-        with col2:
-            override_end_date = (
-                st.date_input(
-                    "End Date",
-                    key="anthem_end_date",
-                )
-            )
+        c1, c2 = st.columns(2)
+        with c1:
+            override_start_date = st.date_input("Start Date", key="anthem_start_date")
+        with c2:
+            override_end_date = st.date_input("End Date", key="anthem_end_date")
 
     preview = None
-
-    if (
-        prisma_file is not None
-        and creative_files
-    ):
+    all_creatives = list(english_creative_files or []) + list(spanish_creative_files or [])
+    if prisma_file is not None and all_creatives:
         try:
-            preview = (
-                preview_anthem_setup(
-                    prisma_file=prisma_file,
-                    creative_files=creative_files,
-                    url_mapping_text=(
-                        url_mapping_text
-                    ),
-                )
+            preview = preview_anthem_setup(
+                prisma_file=prisma_file,
+                english_creative_files=english_creative_files,
+                spanish_creative_files=spanish_creative_files,
+                english_url_mapping_text=english_url_mapping_text,
+                spanish_url_mapping_text=spanish_url_mapping_text,
             )
-
-            placements = (
-                preview["placements"]
-            )
-
-            direct_count = sum(
-                1
-                for row in placements
-                if row[
-                    "creative_destination"
-                ]
-                == "Traffic_Doc"
-            )
-
-            multi_count = sum(
-                1
-                for row in placements
-                if row[
-                    "creative_destination"
-                ]
-                == "Multi"
-            )
-
-            unmatched_count = sum(
-                1
-                for row in placements
-                if row[
-                    "creative_destination"
-                ]
-                == "Unmatched"
-            )
-
-            metric1, metric2, metric3 = (
-                st.columns(3)
-            )
-
-            with metric1:
-                st.metric(
-                    "Direct to Traffic_Doc",
-                    direct_count,
-                )
-
-            with metric2:
-                st.metric(
-                    "Multi Creative Ads",
-                    multi_count,
-                )
-
-            with metric3:
-                st.metric(
-                    "Unmatched Placements",
-                    unmatched_count,
-                )
-
-            with st.expander(
-                "Anthem Creative Matching "
-                "Preview",
-                expanded=True,
-            ):
-                for row in placements:
-                    st.write(
-                        f"**{row['ad_name'] or 'Ad Name not detected'}**"
-                    )
-
-                    st.caption(
-                        "Placement: "
-                        f"{row['placement_name']}"
-                    )
-
-                    st.caption(
-                        "Language / Channel: "
-                        f"{row['language'] or 'Not detected'} / "
-                        f"{row['channel'] or 'Not detected'}"
-                    )
-
-                    st.caption(
-                        "Destination: "
-                        f"{row['creative_destination']}"
-                    )
-
-                    if row["matches"]:
-                        for creative in (
-                            row["matches"]
-                        ):
-                            st.caption(
-                                f"↳ {creative}"
-                            )
-
-                    else:
-                        st.warning(
-                            "No creative matched "
-                            "this placement."
-                        )
-
-                    if not row["url"]:
-                        st.warning(
-                            "No URL mapping found "
-                            "for this placement."
-                        )
-
-                    st.divider()
-
-            if preview["warnings"]:
-                with st.expander(
-                    "Anthem Preview Warnings"
-                ):
-                    for warning in (
-                        preview["warnings"]
-                    ):
-                        st.warning(
-                            warning
-                        )
-
+            placements = preview.get("placements", [])
+            direct_count = sum(1 for r in placements if r.get("creative_destination") == "Traffic_Doc")
+            multi_count = sum(1 for r in placements if r.get("creative_destination") == "Multi")
+            unmatched_count = sum(1 for r in placements if r.get("creative_destination") == "Unmatched")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Placements", len(placements))
+            m2.metric("Direct", direct_count)
+            m3.metric("Multi", multi_count)
+            m4.metric("Unmatched", unmatched_count)
+            with st.expander("Anthem Matching Preview", expanded=False):
+                st.dataframe(placements, use_container_width=True)
+            for warning in preview.get("warnings", []):
+                st.warning(warning)
         except Exception as exc:
-            st.error(
-                "Unable to preview Anthem "
-                f"matching: {exc}"
-            )
+            st.exception(exc)
 
-    output_name = st.text_input(
-        "Output File Name",
-        value="Anthem_Tsheet.xlsm",
-        key="anthem_output",
-    )
-
-    if not output_name.lower().endswith(
-        ".xlsm"
-    ):
-        output_name += ".xlsm"
-
-    if st.button(
-        "Generate Anthem T-Sheet",
-        type="primary",
-        use_container_width=True,
-        key="generate_anthem_tsheet",
-    ):
+    if st.button("Generate Anthem T-Sheet", type="primary", use_container_width=True, key="generate_anthem"):
         if prisma_file is None:
-            st.error(
-                "Please upload the Prisma CSV."
-            )
-
-        elif not creative_files:
-            st.error(
-                "Please upload Anthem creative "
-                "files or ZIPs."
-            )
-
-        elif not url_mapping_text.strip():
-            st.error(
-                "Please paste the Anthem "
-                "URL mapping."
-            )
-
+            st.error("Please upload the Prisma CSV.")
+        elif not all_creatives:
+            st.error("Please upload at least one English or Spanish creative.")
         else:
             try:
-                with st.spinner(
-                    "Generating the Anthem "
-                    "T-Sheet..."
-                ):
-                    output_bytes, warnings = (
-                        generate_anthem_tsheet(
-                            prisma_file=prisma_file,
-                            creative_files=creative_files,
-                            url_mapping_text=(
-                                url_mapping_text
-                            ),
-                            override_start_date=(
-                                override_start_date
-                            ),
-                            override_end_date=(
-                                override_end_date
-                            ),
-                        )
-                    )
-
-                placements = (
-                    preview.get("placements", [])
-                    if preview is not None
-                    else []
+                output_bytes, warnings = generate_anthem_tsheet(
+                    prisma_file=prisma_file,
+                    english_creative_files=english_creative_files,
+                    spanish_creative_files=spanish_creative_files,
+                    english_url_mapping_text=english_url_mapping_text,
+                    spanish_url_mapping_text=spanish_url_mapping_text,
+                    override_start_date=override_start_date,
+                    override_end_date=override_end_date,
                 )
-
-                ads_processed = len(placements)
-
-                direct_count = 0
-                multi_count = 0
-                unmatched_count = 0
-
-                if preview is not None:
-
-                    direct_count = sum(
-                        1
-                        for row in placements
-                        if row.get(
-                            "creative_destination"
-                        )
-                        == "Traffic_Doc"
-                    )
-
-                    multi_count = sum(
-                        1
-                        for row in placements
-                        if row.get(
-                            "creative_destination"
-                        )
-                        == "Multi"
-                    )
-
-                    unmatched_count = sum(
-                        1
-                        for row in placements
-                        if row.get(
-                            "creative_destination"
-                        )
-                        == "Unmatched"
-                    )
-
-                log_dashboard_usage(
-                    account=(
-                        "Anthem / Elevance"
-                    ),
-                    action=(
-                        "T-Sheet Generated"
-                    ),
-                    output_file=output_name,
-                    ads_processed=(
-                        ads_processed
-                    ),
-                    direct_count=(
-                        direct_count
-                    ),
-                    multi_count=(
-                        multi_count
-                    ),
-                    unmatched_count=(
-                        unmatched_count
-                    ),
-                    creative_count=len(
-                        creative_files
-                    ),
-                    warning_count=len(
-                        warnings
-                    ),
-                    estimated_minutes_saved=60,
-                )
-
-                st.success(
-                    "Anthem T-Sheet generated "
-                    "successfully."
-                )
-
-                st.caption(
-                    "Tracking recorded: "
-                    f"{ads_processed:,} Ads "
-                    "processed."
-                )
-
-                if warnings:
-                    with st.expander(
-                        "Review Anthem warnings"
-                    ):
-                        for warning in warnings:
-                            st.warning(
-                                warning
-                            )
-
-                st.download_button(
-                    "Download Anthem T-Sheet",
-                    data=output_bytes,
-                    file_name=output_name,
-                    mime=(
-                        "application/vnd.ms-excel."
-                        "sheet.macroEnabled.12"
-                    ),
-                    use_container_width=True,
-                )
-
+                output_name = "Anthem_Tsheet.xlsm"
+                placements = (preview or {}).get("placements", [])
+                direct_count = sum(1 for r in placements if r.get("creative_destination") == "Traffic_Doc")
+                multi_count = sum(1 for r in placements if r.get("creative_destination") == "Multi")
+                unmatched_count = sum(1 for r in placements if r.get("creative_destination") == "Unmatched")
+                log_dashboard_usage("Anthem / Elevance", "Generate", output_name, len(placements), direct_count, multi_count, unmatched_count, len((preview or {}).get("creative_names", [])), len(warnings))
+                st.success("Anthem T-Sheet generated successfully.")
+                for warning in warnings:
+                    st.warning(warning)
+                st.download_button("Download Anthem T-Sheet", data=output_bytes, file_name=output_name, mime="application/vnd.ms-excel.sheet.macroEnabled.12", use_container_width=True)
             except Exception as exc:
                 st.exception(exc)
 
@@ -1925,6 +1684,104 @@ elif selected_account == (
 # ============================================================
 # ACCOUNTS NOT YET AUTOMATED
 # ============================================================
+
+
+# ============================================================
+# BFAS
+# ============================================================
+
+elif selected_account == "BFAS":
+    st.success("BFAS automation is ready.")
+    st.info("BFAS does not require a Prisma upload. Paste Placement Names, upload creatives, and provide the URL mapping.")
+    placement_text = st.text_area("Paste BFAS Placement Names", placeholder="Paste one Placement Name per line.", height=220, key="bfas_placements")
+    creative_files = st.file_uploader("Upload BFAS Creative Files", type=["jpg", "jpeg", "png", "gif", "webp", "html", "htm", "mp4", "zip"], accept_multiple_files=True, key="bfas_creatives")
+    url_mapping_text = st.text_area("Paste BFAS URL Mapping", placeholder="One URL for all creatives, or: Creative Set<TAB>URL", height=200, key="bfas_urls")
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input("Start Date", key="bfas_start")
+    with c2:
+        end_date = st.date_input("End Date", key="bfas_end")
+    campaign_name = st.text_input("Campaign Name (optional)", key="bfas_campaign")
+    site_name = st.text_input("Site Name", value="Nexxen", key="bfas_site")
+    preview = None
+    if placement_text.strip() and creative_files:
+        try:
+            preview = preview_bfas_setup(placement_text=placement_text, creative_files=creative_files, url_mapping_text=url_mapping_text)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Placements", len(preview.get("rows", [])))
+            m2.metric("Creative Matches", preview.get("matched_count", 0))
+            m3.metric("Unmatched", preview.get("unmatched_count", 0))
+            m4.metric("URL Matches", preview.get("url_matched_count", 0))
+            with st.expander("BFAS Matching Preview", expanded=False):
+                st.dataframe(preview.get("rows", []), use_container_width=True)
+            for warning in preview.get("warnings", []): st.warning(warning)
+        except Exception as exc:
+            st.exception(exc)
+    if st.button("Generate BFAS T-Sheet", type="primary", use_container_width=True, key="generate_bfas"):
+        if not placement_text.strip(): st.error("Please paste BFAS Placement Names.")
+        elif not creative_files: st.error("Please upload BFAS creatives.")
+        else:
+            try:
+                output_bytes, warnings, generation_info = generate_bfas_tsheet(placement_text=placement_text, creative_files=creative_files, url_mapping_text=url_mapping_text, start_date=start_date, end_date=end_date, campaign_name=campaign_name, site_name=site_name)
+                output_name = "BFAS_Tsheet.xlsm"
+                p = preview or {}
+                log_dashboard_usage("BFAS", "Generate", output_name, len(p.get("rows", [])), p.get("matched_count", 0), 0, p.get("unmatched_count", 0), p.get("creative_count", 0), len(warnings))
+                st.success("BFAS T-Sheet generated successfully.")
+                for warning in warnings: st.warning(warning)
+                st.download_button("Download BFAS T-Sheet", data=output_bytes, file_name=output_name, mime="application/vnd.ms-excel.sheet.macroEnabled.12", use_container_width=True)
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# CONED
+# ============================================================
+
+elif selected_account == "ConEd":
+    st.success("ConEd automation is ready.")
+    st.info("Upload the Prisma CSV and ConEd creatives, then paste the tagged URLs/UTMs. Matching is dynamic and uses placement/creative naming plus technical attributes.")
+    prisma_file, creative_files = common_upload_fields("coned", allow_zip=True)
+    urls_text = st.text_area("Paste ConEd URLs / UTMs", placeholder="Paste one tagged URL per line.", height=220, key="coned_urls")
+    override_dates = st.checkbox("Override Prisma flight dates", value=False, key="coned_override_dates")
+    override_start_date = override_end_date = None
+    if override_dates:
+        c1, c2 = st.columns(2)
+        with c1: override_start_date = st.date_input("Start Date", key="coned_start")
+        with c2: override_end_date = st.date_input("End Date", key="coned_end")
+    preview = None
+    if prisma_file is not None and creative_files:
+        try:
+            preview = preview_coned_setup(prisma_file=prisma_file, creative_files=creative_files, urls_text=urls_text)
+            rows = preview.get("rows", [])
+            direct_count = sum(1 for r in rows if r.get("Destination") == "Direct")
+            multi_count = sum(1 for r in rows if r.get("Destination") == "Multi")
+            unmatched_count = sum(1 for r in rows if r.get("Destination") in {"Unmatched", "Ambiguous"})
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Placements", preview.get("placement_count", len(rows)))
+            m2.metric("Direct", direct_count)
+            m3.metric("Multi", multi_count)
+            m4.metric("Unmatched / Ambiguous", unmatched_count)
+            with st.expander("ConEd Matching Preview", expanded=False): st.dataframe(rows, use_container_width=True)
+            for warning in preview.get("warnings", []): st.warning(warning)
+        except Exception as exc:
+            st.exception(exc)
+    if st.button("Generate ConEd T-Sheet", type="primary", use_container_width=True, key="generate_coned"):
+        if prisma_file is None: st.error("Please upload the Prisma CSV.")
+        elif not creative_files: st.error("Please upload ConEd creatives.")
+        else:
+            try:
+                output_bytes, warnings = generate_coned_tsheet(prisma_file=prisma_file, creative_files=creative_files, urls_text=urls_text, override_start_date=override_start_date, override_end_date=override_end_date)
+                output_name = "ConEd_Tsheet.xlsm"
+                rows = (preview or {}).get("rows", [])
+                direct_count = sum(1 for r in rows if r.get("Destination") == "Direct")
+                multi_count = sum(1 for r in rows if r.get("Destination") == "Multi")
+                unmatched_count = sum(1 for r in rows if r.get("Destination") in {"Unmatched", "Ambiguous"})
+                log_dashboard_usage("ConEd", "Generate", output_name, len(rows), direct_count, multi_count, unmatched_count, (preview or {}).get("creative_count", 0), len(warnings))
+                st.success("ConEd T-Sheet generated successfully.")
+                for warning in warnings: st.warning(warning)
+                st.download_button("Download ConEd T-Sheet", data=output_bytes, file_name=output_name, mime="application/vnd.ms-excel.sheet.macroEnabled.12", use_container_width=True)
+            except Exception as exc:
+                st.exception(exc)
 
 
 # ============================================================
