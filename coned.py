@@ -96,18 +96,53 @@ def _channel(text: str) -> str:
 
 
 def _concept(text: str) -> str:
-    low = _clean(text).lower()
-    known = (
-        ("clean energy innovation", "Clean Energy Innovation"),
-        ("customer tools", "Customer Tools"),
-        ("energy care", "Energy Care"),
-        ("smart charge", "Smart Charge"),
-    )
-    for needle, label in known:
-        if needle in low:
-            return label
+    """
+    Generic ConEd theme extraction.
+
+    No campaign theme names are hard-coded here. Theme compatibility is
+    determined dynamically from meaningful words shared by Placement Name
+    and Creative File Name.
+    """
     return ""
 
+
+def _name_tokens(text: str) -> set[str]:
+    """Generic meaningful tokens; no ConEd campaign/theme names are hard-coded."""
+    value = Path(_clean(text)).stem
+    value = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value)
+    value = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", value)
+    value = value.lower()
+
+    tokens = re.findall(r"[a-z0-9]+", value)
+
+    stop = {
+        "programmatic", "display", "banner", "video", "audio", "native",
+        "prospect", "behavioral", "retargeting", "data", "cpm", "device",
+        "local", "web", "traffic", "party", "cross", "oath", "tps",
+        "coned", "cec", "corp", "nan", "creative", "final", "version",
+        "dark", "light", "english", "spanish",
+        "png", "jpg", "jpeg", "gif", "webp", "html", "htm",
+        "mp4", "mov", "m4v", "mp3", "wav", "m4a", "aac", "ogg",
+        "sec",
+    }
+
+    result = set()
+    for token in tokens:
+        if token in stop or len(token) < 3 or token.isdigit():
+            continue
+        if re.fullmatch(r"\d{2,4}", token) or re.fullmatch(r"fy\d+", token):
+            continue
+        result.add(token)
+    return result
+
+
+def _shared_name_score(placement_name: str, creative_name: str) -> tuple[int, set[str]]:
+    """Score dynamically shared audience/theme/concept words."""
+    p_tokens = _name_tokens(placement_name)
+    c_tokens = _name_tokens(creative_name)
+    shared = p_tokens & c_tokens
+    score = sum(max(2, min(len(token), 14)) for token in shared)
+    return score, shared
 
 def _season(text: str) -> str:
     low = _clean(text).lower()
@@ -229,6 +264,14 @@ def _compatible_channel(placement_channel: str, creative_name: str) -> bool:
 
 
 def match_creatives(record, creative_names: list[str]) -> tuple[list[str], str]:
+    """
+    Generic placement-to-creative matching:
+    - hard filter by channel/file type, dimension, duration, language, season
+    - dynamically score shared naming words
+    - strongest family wins
+    - tied strongest versions become Multi
+    - never guess when several candidates have no naming relationship
+    """
     p = _placement_attributes(record)
     candidates = []
 
@@ -237,46 +280,42 @@ def match_creatives(record, creative_names: list[str]) -> tuple[list[str], str]:
 
         if not _compatible_channel(p["channel"], name):
             continue
-        if p["dimension"] and c["dimension"] and p["dimension"].lower() != c["dimension"].lower():
-            continue
-        if p["duration"] and c["duration"] and p["duration"] != c["duration"]:
-            continue
-        if p["language"] and c["language"] and p["language"] != c["language"]:
-            continue
-        if p["concept"] and c["concept"] and p["concept"] != c["concept"]:
-            continue
-        if p["season"] and c["season"] and p["season"] != c["season"]:
+
+        if p["dimension"]:
+            if not c["dimension"] or p["dimension"].lower() != c["dimension"].lower():
+                continue
+
+        if p["duration"]:
+            if not c["duration"] or p["duration"] != c["duration"]:
+                continue
+
+        if p["language"]:
+            if not c["language"] or p["language"] != c["language"]:
+                continue
+
+        if p["season"] and c["season"] != p["season"]:
             continue
 
-        score = 0
-        if p["dimension"] and c["dimension"] == p["dimension"]:
-            score += 50
-        if p["duration"] and c["duration"] == p["duration"]:
-            score += 50
-        if p["language"] and c["language"] == p["language"]:
-            score += 20
-        if p["concept"] and c["concept"] == p["concept"]:
-            score += 40
-        if p["season"] and c["season"] == p["season"]:
-            score += 30
-
-        overlap = _words(p["placement"]) & c["words"]
-        score += min(len(overlap), 8) * 3
-        candidates.append((score, name))
+        score, shared = _shared_name_score(p["placement"], name)
+        candidates.append({"name": name, "score": score, "shared": shared})
 
     if not candidates:
         return [], "Unmatched"
 
-    best = max(score for score, _ in candidates)
-    # Keep all same-concept/version creatives that are equally plausible.
-    matches = [name for score, name in candidates if score == best]
+    if len(candidates) == 1:
+        return [candidates[0]["name"]], "Direct"
 
-    # If the top result is weak and several candidates exist, don't silently guess.
-    if best < 40 and len(candidates) > 1:
+    best_score = max(item["score"] for item in candidates)
+
+    if best_score <= 0:
         return [], "Ambiguous"
 
-    return matches, "Multi" if len(matches) > 1 else "Direct"
+    matches = sorted(
+        {item["name"] for item in candidates if item["score"] == best_score},
+        key=str.lower,
+    )
 
+    return matches, "Multi" if len(matches) > 1 else "Direct"
 
 def _parse_urls(text: str) -> list[str]:
     urls = []
@@ -344,16 +383,9 @@ def match_url(record, urls: list[str], creative_name: str = "") -> tuple[str, st
 
 def build_ad_name(record, matches: list[str]) -> str:
     """
-    ConEd ad names are not reliably derivable from placement taxonomy alone.
-    Use concept + size/duration when concept is identifiable; otherwise use
-    Placement Name exactly to avoid inventing an unsupported naming rule.
+    ConEd rule: Placement Name = Ad Name exactly.
     """
-    p = _placement_attributes(record)
-    if p["concept"]:
-        suffix = p["dimension"] or (f"{p['duration']}s" if p["duration"] else "")
-        season = f" {p['season']}" if p["season"] else ""
-        return f"{p['concept']}{season} {suffix}".strip()
-    return p["placement"]
+    return _placement_name(record)
 
 
 def preview_coned_setup(prisma_file, creative_files, urls_text: str = "") -> dict:
