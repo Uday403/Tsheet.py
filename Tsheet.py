@@ -22,6 +22,10 @@ from bfas import (
     generate_bfas_tsheet,
     preview_bfas_setup,
 )
+from coned import (
+    generate_coned_tsheet,
+    preview_coned_setup,
+)
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 from simon_vip import (
@@ -1017,6 +1021,172 @@ elif selected_account == "BFAS":
 
                 st.download_button(
                     "Download BFAS T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.exception(exc)
+
+
+# ============================================================
+# CONED
+# ============================================================
+
+elif selected_account == "ConEd":
+    st.success("ConEd automation is ready.")
+    st.info(
+        "Upload the Prisma export and ConEd creatives. Creative matching uses "
+        "concept/theme plus dimension or video duration. Multiple matching "
+        "creatives are written to Multi-Ad with Even rotation."
+    )
+
+    prisma_file, creative_files = common_upload_fields("coned", allow_zip=True)
+
+    coned_urls_text = st.text_area(
+        "Paste Complete URLs / UTMs",
+        placeholder=(
+            "Paste all complete ConEd URLs / UTMs here, one per line.\n"
+            "The dashboard matches them using concept, season, channel, "
+            "dimension/duration and language signals when available."
+        ),
+        height=220,
+        key="coned_urls",
+    )
+
+    override_dates = st.checkbox(
+        "Override Prisma flight dates",
+        value=False,
+        key="coned_override_dates",
+    )
+
+    override_start_date = None
+    override_end_date = None
+    if override_dates:
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            override_start_date = st.date_input("Start Date", key="coned_start_date")
+        with date_col2:
+            override_end_date = st.date_input("End Date", key="coned_end_date")
+
+    preview = None
+    if prisma_file is not None and creative_files:
+        try:
+            preview = preview_coned_setup(
+                prisma_file=prisma_file,
+                creative_files=creative_files,
+                urls_text=coned_urls_text,
+            )
+
+            preview_rows = preview.get("rows", [])
+            direct_count = sum(1 for row in preview_rows if row.get("Destination") == "Direct")
+            multi_count = sum(1 for row in preview_rows if row.get("Destination") == "Multi")
+            unmatched_count = sum(
+                1 for row in preview_rows
+                if row.get("Destination") in {"Unmatched", "Ambiguous"}
+            )
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Placements", len(preview_rows))
+            m2.metric("Direct", direct_count)
+            m3.metric("Multi-Ad", multi_count)
+            m4.metric("Unmatched / Ambiguous", unmatched_count)
+
+            with st.expander("ConEd Matching Preview", expanded=True):
+                st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+
+            if preview.get("warnings"):
+                with st.expander("ConEd Preview Warnings", expanded=True):
+                    for warning in preview["warnings"]:
+                        st.warning(warning)
+
+        except Exception as exc:
+            st.error(f"Unable to preview ConEd matching: {exc}")
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="ConEd_Tsheet.xlsm",
+        key="coned_output",
+    )
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    if st.button(
+        "Generate ConEd T-Sheet",
+        type="primary",
+        use_container_width=True,
+        key="generate_coned_tsheet",
+    ):
+        if prisma_file is None:
+            st.error("Please upload the ConEd Prisma CSV.")
+        elif not creative_files:
+            st.error("Please upload the ConEd creative files or ZIP.")
+        elif not coned_urls_text.strip():
+            st.error("Please paste the complete ConEd URLs / UTMs.")
+        elif (
+            override_dates
+            and override_start_date is not None
+            and override_end_date is not None
+            and override_start_date > override_end_date
+        ):
+            st.error("End Date cannot be earlier than Start Date.")
+        else:
+            try:
+                with st.spinner("Generating the ConEd T-Sheet..."):
+                    output_bytes, warnings = generate_coned_tsheet(
+                        prisma_file=prisma_file,
+                        creative_files=creative_files,
+                        urls_text=coned_urls_text,
+                        override_start_date=override_start_date,
+                        override_end_date=override_end_date,
+                    )
+
+                generated_preview = preview
+                if generated_preview is None:
+                    generated_preview = preview_coned_setup(
+                        prisma_file=prisma_file,
+                        creative_files=creative_files,
+                        urls_text=coned_urls_text,
+                    )
+
+                preview_rows = generated_preview.get("rows", [])
+                direct_count = sum(1 for row in preview_rows if row.get("Destination") == "Direct")
+                multi_count = sum(1 for row in preview_rows if row.get("Destination") == "Multi")
+                unmatched_count = sum(
+                    1 for row in preview_rows
+                    if row.get("Destination") in {"Unmatched", "Ambiguous"}
+                )
+
+                log_dashboard_usage(
+                    account="ConEd",
+                    action="T-Sheet Generated",
+                    output_file=output_name,
+                    ads_processed=len(preview_rows),
+                    direct_count=direct_count,
+                    multi_count=multi_count,
+                    unmatched_count=unmatched_count,
+                    creative_count=generated_preview.get("creative_count", len(creative_files)),
+                    warning_count=len(warnings),
+                    estimated_minutes_saved=45,
+                )
+
+                st.success("ConEd T-Sheet generated successfully.")
+                st.caption(
+                    f"{len(preview_rows):,} placements processed | "
+                    f"{direct_count:,} direct | "
+                    f"{multi_count:,} Multi-Ad | "
+                    f"{unmatched_count:,} unmatched/ambiguous"
+                )
+
+                if warnings:
+                    with st.expander("Review ConEd warnings"):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                st.download_button(
+                    "Download ConEd T-Sheet",
                     data=output_bytes,
                     file_name=output_name,
                     mime="application/vnd.ms-excel.sheet.macroEnabled.12",
