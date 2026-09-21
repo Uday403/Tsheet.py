@@ -106,42 +106,113 @@ def _concept(text: str) -> str:
     return ""
 
 
+def _normalize_match_token(token: str) -> str:
+    """
+    Lightweight normalization for naming comparisons only.
+    Handles normal singular/plural variations without hard-coding campaign themes:
+      Innovations -> innovation
+      Reports -> report
+      Tools -> tool
+      Upgrades -> upgrade
+    """
+    token = str(token or "").lower().strip()
+
+    if len(token) > 5 and token.endswith("ies"):
+        token = token[:-3] + "y"
+    elif len(token) > 5 and token.endswith("ses"):
+        token = token[:-2]
+    elif len(token) > 4 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+        token = token[:-1]
+
+    return token
+
+
 def _name_tokens(text: str) -> set[str]:
-    """Generic meaningful tokens; no ConEd campaign/theme names are hard-coded."""
+    """
+    Meaningful generic tokens from placements, creatives or UTMs.
+    No campaign/theme names such as Innovation, Customer Tools, Commercial,
+    Residential, etc. are hard-coded.
+
+    CamelCase is split:
+      CleanEnergyInnovation -> clean, energy, innovation
+      PartnerInGrowth       -> partner, in, growth
+    """
     value = Path(_clean(text)).stem
+
     value = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value)
     value = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", value)
     value = value.lower()
 
     tokens = re.findall(r"[a-z0-9]+", value)
 
+    # Only trafficking/technical boilerplate is ignored.
     stop = {
         "programmatic", "display", "banner", "video", "audio", "native",
-        "prospect", "behavioral", "retargeting", "data", "cpm", "device",
-        "local", "web", "traffic", "party", "cross", "oath", "tps",
-        "coned", "cec", "corp", "nan", "creative", "final", "version",
-        "dark", "light", "english", "spanish",
+        "prospect", "behavioral", "retargeting", "geo", "data", "cpm",
+        "device", "local", "web", "traffic", "party", "cross", "oath",
+        "tps", "coned", "cec", "corp", "nan", "creative", "final",
+        "version", "dark", "light", "english", "spanish",
         "png", "jpg", "jpeg", "gif", "webp", "html", "htm",
         "mp4", "mov", "m4v", "mp3", "wav", "m4a", "aac", "ogg",
-        "sec",
+        "http", "https", "www", "com", "utm", "source", "medium",
+        "campaign", "content", "term", "assembly", "cpc", "sec",
+        "none", "broad",
     }
 
     result = set()
-    for token in tokens:
-        if token in stop or len(token) < 3 or token.isdigit():
+    for raw in tokens:
+        token = _normalize_match_token(raw)
+
+        if token in stop:
             continue
-        if re.fullmatch(r"\d{2,4}", token) or re.fullmatch(r"fy\d+", token):
+        if len(token) < 3:
             continue
+        if token.isdigit():
+            continue
+        if re.fullmatch(r"\d{2,4}", token):
+            continue
+        if re.fullmatch(r"fy\d+", token):
+            continue
+        if re.fullmatch(r"\d+x\d+", token):
+            continue
+
         result.add(token)
+
     return result
 
 
+def _semantic_shared_tokens(left: str, right: str) -> set[str]:
+    """
+    Generic semantic-name overlap.
+
+    Exact normalized tokens match first. We also allow a long token to contain
+    another long token, which helps naming variations while remaining generic.
+    """
+    left_tokens = _name_tokens(left)
+    right_tokens = _name_tokens(right)
+
+    shared = left_tokens & right_tokens
+
+    for a in left_tokens:
+        for b in right_tokens:
+            if a == b:
+                continue
+            if min(len(a), len(b)) < 6:
+                continue
+            if a in b or b in a:
+                shared.add(a if len(a) <= len(b) else b)
+
+    return shared
+
+
 def _shared_name_score(placement_name: str, creative_name: str) -> tuple[int, set[str]]:
-    """Score dynamically shared audience/theme/concept words."""
-    p_tokens = _name_tokens(placement_name)
-    c_tokens = _name_tokens(creative_name)
-    shared = p_tokens & c_tokens
-    score = sum(max(2, min(len(token), 14)) for token in shared)
+    """
+    Score only meaningful naming relationships.
+    Dimensions/language/channel are handled separately as hard filters and
+    therefore cannot accidentally make the wrong creative family win.
+    """
+    shared = _semantic_shared_tokens(placement_name, creative_name)
+    score = sum(max(3, min(len(token), 16)) for token in shared)
     return score, shared
 
 def _season(text: str) -> str:
@@ -265,14 +336,22 @@ def _compatible_channel(placement_channel: str, creative_name: str) -> bool:
 
 def match_creatives(record, creative_names: list[str]) -> tuple[list[str], str]:
     """
-    Generic placement-to-creative matching:
-    - hard filter by channel/file type, dimension, duration, language, season
-    - dynamically score shared naming words
-    - strongest family wins
-    - tied strongest versions become Multi
-    - never guess when several candidates have no naming relationship
+    Generic ConEd placement -> creative matching.
+
+    Technical attributes are HARD filters.
+    Naming/family relationship is then selected dynamically.
+
+    Important:
+      - No campaign/theme list is maintained.
+      - "Innovation" can match "CleanEnergyInnovation".
+      - "Innovations" also matches "Innovation".
+      - A future unseen naming family works the same way.
+      - Multiple strongest creative variants become Multi-Ad.
+      - Multiple technically valid creatives with no naming relationship are
+        Ambiguous instead of being guessed.
     """
     p = _placement_attributes(record)
+    placement_name = p["placement"]
     candidates = []
 
     for name in creative_names:
@@ -296,8 +375,13 @@ def match_creatives(record, creative_names: list[str]) -> tuple[list[str], str]:
         if p["season"] and c["season"] != p["season"]:
             continue
 
-        score, shared = _shared_name_score(p["placement"], name)
-        candidates.append({"name": name, "score": score, "shared": shared})
+        score, shared = _shared_name_score(placement_name, name)
+
+        candidates.append({
+            "name": name,
+            "score": score,
+            "shared": shared,
+        })
 
     if not candidates:
         return [], "Unmatched"
@@ -307,6 +391,7 @@ def match_creatives(record, creative_names: list[str]) -> tuple[list[str], str]:
 
     best_score = max(item["score"] for item in candidates)
 
+    # Never let same size/language alone decide among different creative sets.
     if best_score <= 0:
         return [], "Ambiguous"
 
@@ -344,42 +429,79 @@ def _url_attributes(url: str) -> dict:
 
 
 def match_url(record, urls: list[str], creative_name: str = "") -> tuple[str, str]:
+    """
+    Generic URL/UTM matching.
+
+    Uses technical signals plus semantic naming from the placement/creative
+    against the decoded URL/UTM. Singular/plural variations are normalized,
+    so placement "Innovations" can map to utm_term=ce_innovation_....
+
+    If two URLs remain equally valid, return Ambiguous instead of guessing.
+    """
+    from urllib.parse import unquote_plus
+
     p = _placement_attributes(record)
     c = _creative_attributes(creative_name) if creative_name else {}
+    placement_text = p["placement"]
+    creative_text = creative_name or ""
+
     ranked = []
 
     for url in urls:
         u = _url_attributes(url)
+        decoded_url = unquote_plus(url.replace("&amp;", "&"))
 
-        # Hard conflicts only when both sides explicitly expose the signal.
-        for key in ("language", "channel", "dimension", "duration", "concept", "season"):
+        # Explicit technical conflicts eliminate the URL.
+        conflict = False
+        for key in ("language", "channel", "dimension", "duration", "season"):
             expected = p.get(key) or c.get(key, "")
             actual = u.get(key, "")
             if expected and actual and expected != actual:
+                conflict = True
                 break
-        else:
-            score = 0
-            for key, weight in (
-                ("language", 20), ("channel", 30), ("dimension", 30),
-                ("duration", 30), ("concept", 50), ("season", 40),
-            ):
-                expected = p.get(key) or c.get(key, "")
-                if expected and u.get(key) == expected:
-                    score += weight
-            overlap = (_words(p["placement"]) | c.get("words", set())) & u["words"]
-            score += min(len(overlap), 8) * 3
-            ranked.append((score, url))
+
+        if conflict:
+            continue
+
+        score = 0
+
+        # Strong technical evidence.
+        for key, weight in (
+            ("language", 60),
+            ("channel", 45),
+            ("dimension", 40),
+            ("duration", 40),
+            ("season", 35),
+        ):
+            expected = p.get(key) or c.get(key, "")
+            actual = u.get(key, "")
+            if expected and actual and expected == actual:
+                score += weight
+
+        # Dynamic family/theme evidence from both placement and creative.
+        placement_shared = _semantic_shared_tokens(placement_text, decoded_url)
+        creative_shared = _semantic_shared_tokens(creative_text, decoded_url) if creative_text else set()
+
+        score += sum(max(5, min(len(t), 18)) for t in placement_shared)
+        score += sum(max(7, min(len(t), 20)) for t in creative_shared)
+
+        ranked.append({
+            "score": score,
+            "url": url,
+            "placement_shared": placement_shared,
+            "creative_shared": creative_shared,
+        })
 
     if not ranked:
         return "", "Unmatched"
 
-    ranked.sort(reverse=True)
-    top_score = ranked[0][0]
-    top = [url for score, url in ranked if score == top_score]
-    if len(top) > 1:
-        return "", "Ambiguous"
-    return top[0], "Matched"
+    best_score = max(item["score"] for item in ranked)
+    best = [item for item in ranked if item["score"] == best_score]
 
+    if len(best) > 1:
+        return "", "Ambiguous"
+
+    return best[0]["url"], "Matched"
 
 def build_ad_name(record, matches: list[str]) -> str:
     """
