@@ -1797,47 +1797,32 @@ elif selected_account == "ConEd":
 elif selected_account == "Perdue":
     st.success("Perdue automation is ready.")
     st.info(
-        "Upload the Prisma CSV and raw creative files. Perdue placement taxonomy is "
-        "parsed automatically to create the Ad Name. You provide the base landing URL and the dashboard adds the Final URL + UTM. Raw creative "
-        "files are matched and renamed; a ZIP of the renamed creatives is generated "
-        "with the T-Sheet. No taxonomy workbook is required."
+        "Upload the Prisma CSV and Perdue creatives. The dashboard matches the ORIGINAL "
+        "creative filenames to the placement taxonomy, creates the Ad Name, and appends "
+        "the Perdue UTM to the base landing URL you provide. Creatives are not renamed."
     )
 
-    prisma_file, creative_files = common_upload_fields("perdue", allow_zip=True)
-
-    st.subheader("Creative Mapping")
-    st.caption(
-        "Only use this when incoming creative filenames are generic or ambiguous. "
-        "Enter one mapping per line as: Original File<TAB>CreativeName-CTA. "
-        "Example: video1.mp4<TAB>BouncyBalls-SaveNow"
+    prisma_file = st.file_uploader(
+        "Upload Prisma CSV",
+        type=["csv", "txt"],
+        key="perdue_prisma",
     )
-    creative_mapping_text = st.text_area(
-        "Optional Creative Mapping",
-        placeholder=(
-            "video1.mp4\tBouncyBalls-SaveNow\n"
-            "video2.mp4\tFairy-SaveNow\n"
-            "300x250.png\tCSCrave-BuyNow"
-        ),
-        height=150,
-        key="perdue_creative_mapping",
+    creative_files = st.file_uploader(
+        "Upload Perdue Creative Files",
+        type=["jpg", "jpeg", "png", "gif", "webp", "html", "htm", "mp4", "mov", "m4v", "zip"],
+        accept_multiple_files=True,
+        key="perdue_creatives",
     )
 
     st.subheader("Landing URL")
     st.caption(
-        "Paste the BASE landing URL supplied by the team. The dashboard will create and append "
-        "the Perdue UTM automatically from the Placement Name. If one URL applies to every "
-        "placement, paste only that URL. If different URLs are required, map them as "
-        "Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL."
+        "Paste the BASE landing URL supplied by the team. If one URL applies to all placements, "
+        "paste just that one URL. The dashboard generates the UTM separately for every placement."
     )
     landing_urls_text = st.text_area(
-        "Paste Base Landing URL(s)",
-        placeholder=(
-            "https://www.perdue.com/products/perdue-crispy-chicken-strips\n\n"
-            "OR for multiple URLs:\n"
-            "CrispyStrips-Continuity\thttps://www.perdue.com/products/perdue-crispy-chicken-strips\n"
-            "GroundChicken-Continuity\thttps://www.perdue.com/products/perdue-fresh-ground-chicken"
-        ),
-        height=180,
+        "Base Landing URL",
+        placeholder="https://www.perdue.com/products/perdue-crispy-chicken-strips",
+        height=110,
         key="perdue_landing_urls",
     )
 
@@ -1855,10 +1840,8 @@ elif selected_account == "Perdue":
             preview = preview_perdue_setup(
                 prisma_file=prisma_file,
                 creative_files=creative_files,
-                creative_mapping_text=creative_mapping_text,
                 landing_urls_text=landing_urls_text,
             )
-
             rows = preview.get("rows", [])
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Placements", len(rows))
@@ -1866,46 +1849,37 @@ elif selected_account == "Perdue":
             m3.metric("Unmatched", preview.get("unmatched_count", 0))
             m4.metric("Final URLs Created", preview.get("url_matched_count", 0))
 
-            preview_rows = []
-            for row in rows:
-                preview_rows.append({
-                    "Placement Name": row.get("placement_name", ""),
-                    "Channel": row.get("channel", ""),
-                    "Partner": row.get("partner", ""),
-                    "Size": row.get("size", ""),
-                    "Concept": row.get("concept", ""),
-                    "Ad Name": row.get("ad_name", ""),
-                    "Original Creative": row.get("original_creative", ""),
-                    "Renamed Creative": row.get("renamed_creative", ""),
-                    "Final URL + UTM": row.get("final_url", ""),
-                    "Status": row.get("status", ""),
-                })
+            preview_rows = [{
+                "Placement Name": row.get("placement_name", ""),
+                "Channel": row.get("channel", ""),
+                "Partner": row.get("partner", ""),
+                "Size": row.get("size", ""),
+                "Concept": row.get("concept", ""),
+                "Ad Name": row.get("ad_name", ""),
+                "Matched Creative": row.get("original_creative", ""),
+                "Final URL + UTM": row.get("final_url", ""),
+                "Status": row.get("status", ""),
+            } for row in rows]
 
             with st.expander("Perdue Matching Preview", expanded=True):
                 st.dataframe(preview_rows, use_container_width=True, hide_index=True)
 
             if preview.get("unmatched_count", 0):
                 st.warning(
-                    "Some creatives could not be matched safely. Add them to Optional "
-                    "Creative Mapping above before generating the final files."
+                    "Some creatives could not be matched safely from their filenames. "
+                    "They will remain unmatched rather than being guessed."
                 )
-
-            if preview.get("url_unmatched_count", 0):
-                st.warning(
-                    "Some placements do not have a supplied landing URL. Paste one base URL for all placements, "
-                    "or map different URLs using Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL."
-                )
-
+            if preview.get("url_unmatched_count", 0) and landing_urls_text.strip():
+                st.warning("The supplied landing URL could not be applied to some placements.")
             if preview.get("warnings"):
                 with st.expander("Perdue Preview Warnings", expanded=False):
                     for warning in preview["warnings"]:
                         st.warning(warning)
-
         except Exception as exc:
             st.exception(exc)
 
     if st.button(
-        "Generate Perdue T-Sheet + Renamed Creatives",
+        "Generate Perdue T-Sheet",
         type="primary",
         use_container_width=True,
         key="generate_perdue",
@@ -1913,16 +1887,15 @@ elif selected_account == "Perdue":
         if prisma_file is None:
             st.error("Please upload the Prisma CSV.")
         elif not landing_urls_text.strip():
-            st.error("Please paste the Perdue base landing URL. The dashboard will add the UTM automatically.")
+            st.error("Please paste the Perdue base landing URL.")
         elif not creative_files:
             st.error("Please upload the Perdue creative files.")
         else:
             try:
-                with st.spinner("Generating Perdue T-Sheet and renamed creatives..."):
-                    output_bytes, renamed_zip, warnings, stats = generate_perdue_tsheet(
+                with st.spinner("Generating Perdue T-Sheet..."):
+                    output_bytes, warnings, stats = generate_perdue_tsheet(
                         prisma_file=prisma_file,
                         creative_files=creative_files,
-                        creative_mapping_text=creative_mapping_text,
                         landing_urls_text=landing_urls_text,
                     )
 
@@ -1939,36 +1912,24 @@ elif selected_account == "Perdue":
                     estimated_minutes_saved=60,
                 )
 
-                st.success("Perdue T-Sheet and renamed creatives generated successfully.")
+                st.success("Perdue T-Sheet generated successfully.")
                 st.caption(
                     f"{stats.get('placement_count', 0)} placements processed | "
                     f"{stats.get('matched_count', 0)} creative matches | "
                     f"{stats.get('url_matched_count', 0)} Final URLs created"
                 )
-
                 if warnings:
                     with st.expander("Review Perdue warnings", expanded=False):
                         for warning in warnings:
                             st.warning(warning)
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.download_button(
-                        "Download Perdue T-Sheet",
-                        data=output_bytes,
-                        file_name=output_name,
-                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-                        use_container_width=True,
-                    )
-                with c2:
-                    st.download_button(
-                        "Download Renamed Creatives ZIP",
-                        data=renamed_zip,
-                        file_name="Perdue_Renamed_Creatives.zip",
-                        mime="application/zip",
-                        use_container_width=True,
-                    )
-
+                st.download_button(
+                    "Download Perdue T-Sheet",
+                    data=output_bytes,
+                    file_name=output_name,
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    use_container_width=True,
+                )
             except Exception as exc:
                 st.exception(exc)
 
