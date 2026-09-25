@@ -985,10 +985,17 @@ def _campaign_from_placement(
     placement_name: str,
     tracking: dict,
 ) -> str:
-    # Explicit Pulte campaign/purpose tokens must take priority over the
-    # generic tracking-category matcher. Otherwise a placement containing
-    # Heavy Up can be incorrectly classified as Prospect (PROS) before the
-    # Heavy Up (HU) alias is evaluated.
+    """
+    Resolve the Pulte Campaign/Purpose safely.
+
+    Pulte VIP placement taxonomy places the campaign immediately after the
+    Brand field, e.g.:
+        ..._Raleigh_Centex_Heavy Up_Carpenter Falls V2_211453_...
+
+    Earlier fields can legitimately contain values such as Prospect for
+    audience/tactic purposes. Those must not override the actual campaign.
+    Therefore the field immediately after Brand is the strongest signal.
+    """
     aliases = {
         "heavyup": "Heavy Up",
         "qmi": "QMI",
@@ -1003,6 +1010,41 @@ def _campaign_from_placement(
         "nurturing": "Nurturing",
     }
 
+    # 1) Strongest rule: campaign is the field immediately after Brand.
+    parts = _split_placement(placement_name)
+    brand_aliases = {
+        "pulte", "delwebb", "centex", "divosta",
+        "wieland", "johnwieland", "americanwest",
+    }
+
+    for index, part in enumerate(parts):
+        if _normalize(part) not in brand_aliases:
+            continue
+        if index + 1 >= len(parts):
+            break
+
+        candidate = parts[index + 1]
+        candidate_norm = _normalize(candidate)
+
+        # First resolve known Pulte aliases.
+        official = aliases.get(candidate_norm)
+        if official and _lookup_code(tracking, "Campaign", official):
+            return official
+
+        # Also allow an exact official Campaign category after Brand.
+        for row in tracking.get("Campaign", []):
+            category = _clean(row.get("category"))
+            if (
+                category
+                and _normalize(category) != "choosevalue"
+                and _normalize(category) == candidate_norm
+                and _lookup_code(tracking, "Campaign", category)
+            ):
+                return category
+        break
+
+    # 2) Fallback: explicit Pulte campaign tokens anywhere in the placement.
+    # This is only used if the structured Brand -> Campaign position failed.
     normalized = _normalize(placement_name)
     for token, official in sorted(
         aliases.items(),
@@ -1012,8 +1054,7 @@ def _campaign_from_placement(
         if token in normalized and _lookup_code(tracking, "Campaign", official):
             return official
 
-    # Fall back to generic official-category detection only when no explicit
-    # Pulte campaign token was found.
+    # 3) Last resort: generic official-category detection.
     detected = _match_tracking_category(placement_name, tracking, "Campaign")
     if detected:
         return detected
