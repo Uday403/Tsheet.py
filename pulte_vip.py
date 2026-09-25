@@ -985,10 +985,10 @@ def _campaign_from_placement(
     placement_name: str,
     tracking: dict,
 ) -> str:
-    detected = _match_tracking_category(placement_name, tracking, "Campaign")
-    if detected:
-        return detected
-
+    # Explicit Pulte campaign/purpose tokens must take priority over the
+    # generic tracking-category matcher. Otherwise a placement containing
+    # Heavy Up can be incorrectly classified as Prospect (PROS) before the
+    # Heavy Up (HU) alias is evaluated.
     aliases = {
         "heavyup": "Heavy Up",
         "qmi": "QMI",
@@ -1011,6 +1011,12 @@ def _campaign_from_placement(
     ):
         if token in normalized and _lookup_code(tracking, "Campaign", official):
             return official
+
+    # Fall back to generic official-category detection only when no explicit
+    # Pulte campaign token was found.
+    detected = _match_tracking_category(placement_name, tracking, "Campaign")
+    if detected:
+        return detected
 
     return ""
 
