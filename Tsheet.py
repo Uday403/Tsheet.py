@@ -1798,7 +1798,7 @@ elif selected_account == "Perdue":
     st.success("Perdue automation is ready.")
     st.info(
         "Upload the Prisma CSV and raw creative files. Perdue placement taxonomy is "
-        "parsed automatically to create the Ad Name and Final URL + UTM. Raw creative "
+        "parsed automatically to create the Ad Name. You provide the base landing URL and the dashboard adds the Final URL + UTM. Raw creative "
         "files are matched and renamed; a ZIP of the renamed creatives is generated "
         "with the T-Sheet. No taxonomy workbook is required."
     )
@@ -1822,17 +1822,24 @@ elif selected_account == "Perdue":
         key="perdue_creative_mapping",
     )
 
-    with st.expander("Optional Landing Page Overrides", expanded=False):
-        st.caption(
-            "Known Perdue landing pages are built into perdue.py. Use this only for a "
-            "new Product/Effort that is not configured yet. Format: Product-Effort<TAB>URL."
-        )
-        landing_page_overrides_text = st.text_area(
-            "Landing Page Overrides",
-            placeholder="NewProduct-Effort\thttps://www.perdue.com/...",
-            height=120,
-            key="perdue_landing_overrides",
-        )
+    st.subheader("Landing URL")
+    st.caption(
+        "Paste the BASE landing URL supplied by the team. The dashboard will create and append "
+        "the Perdue UTM automatically from the Placement Name. If one URL applies to every "
+        "placement, paste only that URL. If different URLs are required, map them as "
+        "Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL."
+    )
+    landing_urls_text = st.text_area(
+        "Paste Base Landing URL(s)",
+        placeholder=(
+            "https://www.perdue.com/products/perdue-crispy-chicken-strips\n\n"
+            "OR for multiple URLs:\n"
+            "CrispyStrips-Continuity\thttps://www.perdue.com/products/perdue-crispy-chicken-strips\n"
+            "GroundChicken-Continuity\thttps://www.perdue.com/products/perdue-fresh-ground-chicken"
+        ),
+        height=180,
+        key="perdue_landing_urls",
+    )
 
     output_name = st.text_input(
         "Output File Name",
@@ -1849,7 +1856,7 @@ elif selected_account == "Perdue":
                 prisma_file=prisma_file,
                 creative_files=creative_files,
                 creative_mapping_text=creative_mapping_text,
-                landing_page_overrides_text=landing_page_overrides_text,
+                landing_urls_text=landing_urls_text,
             )
 
             rows = preview.get("rows", [])
@@ -1885,8 +1892,8 @@ elif selected_account == "Perdue":
 
             if preview.get("url_unmatched_count", 0):
                 st.warning(
-                    "Some placements do not have a configured landing page. Add only "
-                    "those new Product/Effort landing pages under Landing Page Overrides."
+                    "Some placements do not have a supplied landing URL. Paste one base URL for all placements, "
+                    "or map different URLs using Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL."
                 )
 
             if preview.get("warnings"):
@@ -1905,6 +1912,8 @@ elif selected_account == "Perdue":
     ):
         if prisma_file is None:
             st.error("Please upload the Prisma CSV.")
+        elif not landing_urls_text.strip():
+            st.error("Please paste the Perdue base landing URL. The dashboard will add the UTM automatically.")
         elif not creative_files:
             st.error("Please upload the Perdue creative files.")
         else:
@@ -1914,7 +1923,7 @@ elif selected_account == "Perdue":
                         prisma_file=prisma_file,
                         creative_files=creative_files,
                         creative_mapping_text=creative_mapping_text,
-                        landing_page_overrides_text=landing_page_overrides_text,
+                        landing_urls_text=landing_urls_text,
                     )
 
                 log_dashboard_usage(
