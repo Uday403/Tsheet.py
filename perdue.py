@@ -309,19 +309,14 @@ def parse_creative_mapping(text: str) -> dict[str, str]:
     return result
 
 
-def _match_creative(tax: dict, creatives: list[dict], mapping: dict[str, str]) -> tuple[dict | None, str]:
+def _match_creative(tax: dict, creatives: list[dict]) -> tuple[dict | None, str]:
+    """Match using the ORIGINAL creative filename only. Never rename or guess ties."""
     target = f'{tax.get("CreativeName", "")}-{tax.get("CTA", "")}'
     target_norm = _norm(target)
     required = _target_size(tax).lower()
     candidates = []
 
     for item in creatives:
-        mapped = mapping.get(item["name"].lower(), "")
-        if mapped:
-            if _norm(mapped) == target_norm:
-                candidates.append((10000, item))
-            continue
-
         detected = _extract_dimension(item["name"]) or _extract_duration(item["name"])
         if required and detected and detected.lower() != required:
             continue
@@ -345,14 +340,13 @@ def _match_creative(tax: dict, creatives: list[dict], mapping: dict[str, str]) -
     return best[0], "Matched"
 
 
-def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str = "", landing_urls_text: str = "") -> dict:
+def preview_perdue_setup(prisma_file, creative_files, landing_urls_text: str = "") -> dict:
     _, records = read_prisma_export(prisma_file)
     creatives = _read_creatives(creative_files)
-    mapping = parse_creative_mapping(creative_mapping_text)
     user_urls = parse_landing_urls(landing_urls_text)
     rows, warnings = [], []
     if user_urls.get("__multiple_unmapped__"):
-        warnings.append("Multiple bare landing URLs were pasted. Use Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL so each URL can be mapped safely.")
+        warnings.append("Multiple bare landing URLs were pasted. Paste one base URL for all placements, or map URLs with Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL.")
 
     for rec in records:
         placement = _get(rec, "Placement Name")
@@ -364,14 +358,13 @@ def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str
 
         landing = landing_page_for(tax, user_urls)
         url = build_final_url(tax, landing) if landing else ""
-        creative, status = _match_creative(tax, creatives, mapping)
-        renamed = build_creative_filename(tax, creative["extension"]) if creative else ""
+        creative, status = _match_creative(tax, creatives)
         ad_name = build_ad_name(tax)
 
         if not landing:
-            warnings.append(f"User landing URL required for {tax['Product-Effort']} / {tax['CreativeName']}-{tax['CTA']}.")
+            warnings.append(f"Landing URL required for {tax['Product-Effort']} / {tax['CreativeName']}-{tax['CTA']}.")
         if status != "Matched":
-            warnings.append(f"{status} creative for {placement}. Add Creative Mapping if the raw filename is generic.")
+            warnings.append(f"{status} creative for {placement}. Creative filenames must contain enough concept/CTA/size or duration information to match safely.")
 
         rows.append({
             "placement_name": placement,
@@ -381,7 +374,6 @@ def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str
             "concept": f'{tax.get("CreativeName", "")}-{tax.get("CTA", "")}',
             "ad_name": ad_name,
             "original_creative": creative["name"] if creative else "",
-            "renamed_creative": renamed,
             "landing_page": landing,
             "final_url": url,
             "status": status if landing else f"{status}; Landing page missing",
@@ -400,7 +392,6 @@ def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str
         "url_unmatched_count": sum(1 for x in rows if not x.get("final_url")),
         "warnings": warnings,
     }
-
 
 def _find_header_row(ws) -> int:
     for r in range(1, min(ws.max_row, 40) + 1):
@@ -457,36 +448,17 @@ def _write_prisma_sheet(wb, raw_rows: list[list[str]]) -> None:
             ws.cell(r, c).value = value
 
 
-def build_renamed_creatives_zip(preview: dict) -> bytes:
-    output = io.BytesIO()
-    written = set()
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
-        for row in preview["rows"]:
-            item = row.get("_creative")
-            renamed = row.get("renamed_creative")
-            if not item or not renamed:
-                continue
-            key = renamed.lower()
-            if key in written:
-                continue
-            written.add(key)
-            zf.writestr(renamed, item["bytes"])
-    return output.getvalue()
-
-
 def generate_perdue_tsheet(
     prisma_file,
     creative_files,
-    creative_mapping_text: str = "",
     landing_urls_text: str = "",
     template_path: str | Path | None = None,
-) -> tuple[bytes, bytes, list[str], dict]:
-    """Return (xlsm_bytes, renamed_creatives_zip_bytes, warnings, stats)."""
+) -> tuple[bytes, list[str], dict]:
+    """Generate Perdue T-sheet using original creative filenames. Return (xlsm_bytes, warnings, stats)."""
     raw_rows, _ = read_prisma_export(prisma_file)
     preview = preview_perdue_setup(
         prisma_file=prisma_file,
         creative_files=creative_files,
-        creative_mapping_text=creative_mapping_text,
         landing_urls_text=landing_urls_text,
     )
 
@@ -503,7 +475,6 @@ def generate_perdue_tsheet(
     first = header_row + 1
     cols = _header_map(ws, header_row)
 
-    # Preserve first-row formatting, then clear old values.
     style_cells = {c: copy(ws.cell(first, c)._style) for c in range(1, ws.max_column + 1)}
     number_formats = {c: ws.cell(first, c).number_format for c in range(1, ws.max_column + 1)}
     for r in range(first, max(ws.max_row, first + len(preview["rows"]) + 20) + 1):
@@ -513,7 +484,8 @@ def generate_perdue_tsheet(
     for i, item in enumerate(preview["rows"]):
         r = first + i
         for c in range(1, ws.max_column + 1):
-            ws.cell(r, c)._style = copy(style_cells[c]); ws.cell(r, c).number_format = number_formats[c]
+            ws.cell(r, c)._style = copy(style_cells[c])
+            ws.cell(r, c).number_format = number_formats[c]
         rec = item.get("_record", {})
         tax = item.get("_tax", {})
         channel = tax.get("Channel", "")
@@ -527,7 +499,7 @@ def generate_perdue_tsheet(
             "vast": "VAST" if channel in {"OLV", "CTV"} else "",
             "ad": item.get("ad_name", ""),
             "action": "New",
-            "creative": item.get("renamed_creative", ""),
+            "creative": item.get("original_creative", ""),
             "studio": "N",
             "rotation": 1,
             "start": _parse_date(_get(rec, "Flight start date", "Start Date")),
@@ -538,15 +510,14 @@ def generate_perdue_tsheet(
             if key in cols:
                 ws.cell(r, cols[key]).value = value
 
-    # Perdue direct creative workflow: clear old Multi rows to prevent stale rotations.
     if MULTI_SHEET in wb.sheetnames:
         multi = wb[MULTI_SHEET]
         for row in multi.iter_rows(min_row=2):
-            for cell in row: cell.value = None
+            for cell in row:
+                cell.value = None
 
     out = io.BytesIO()
     wb.save(out)
-    renamed_zip = build_renamed_creatives_zip(preview)
     stats = {
         "placement_count": len(preview["rows"]),
         "creative_count": preview["creative_count"],
@@ -555,4 +526,5 @@ def generate_perdue_tsheet(
         "url_matched_count": preview["url_matched_count"],
         "url_unmatched_count": preview["url_unmatched_count"],
     }
-    return out.getvalue(), renamed_zip, preview["warnings"], stats
+    return out.getvalue(), preview["warnings"], stats
+
