@@ -27,6 +27,11 @@ from coned import (
     generate_coned_tsheet,
     preview_coned_setup,
 )
+
+from perdue import (
+    generate_perdue_tsheet,
+    preview_perdue_setup,
+)
 from pulte_normal import generate_normal_pulte_tsheet
 from pulte_vip import generate_pulte_tsheet
 from simon_vip import (
@@ -43,6 +48,7 @@ ACCOUNT_NAMES = [
     "Simon VIP",
     "Anthem / Elevance",
     "Brooks",
+    "Perdue",
     "BFAS",
     "UPS Store",
     "Hyatt",
@@ -1780,6 +1786,180 @@ elif selected_account == "ConEd":
                 st.success("ConEd T-Sheet generated successfully.")
                 for warning in warnings: st.warning(warning)
                 st.download_button("Download ConEd T-Sheet", data=output_bytes, file_name=output_name, mime="application/vnd.ms-excel.sheet.macroEnabled.12", use_container_width=True)
+            except Exception as exc:
+                st.exception(exc)
+
+
+
+# ============================================================
+# PERDUE
+# ============================================================
+elif selected_account == "Perdue":
+    st.success("Perdue automation is ready.")
+    st.info(
+        "Upload the Prisma CSV and raw creative files. Perdue placement taxonomy is "
+        "parsed automatically to create the Ad Name and Final URL + UTM. Raw creative "
+        "files are matched and renamed; a ZIP of the renamed creatives is generated "
+        "with the T-Sheet. No taxonomy workbook is required."
+    )
+
+    prisma_file, creative_files = common_upload_fields("perdue", allow_zip=True)
+
+    st.subheader("Creative Mapping")
+    st.caption(
+        "Only use this when incoming creative filenames are generic or ambiguous. "
+        "Enter one mapping per line as: Original File<TAB>CreativeName-CTA. "
+        "Example: video1.mp4<TAB>BouncyBalls-SaveNow"
+    )
+    creative_mapping_text = st.text_area(
+        "Optional Creative Mapping",
+        placeholder=(
+            "video1.mp4\tBouncyBalls-SaveNow\n"
+            "video2.mp4\tFairy-SaveNow\n"
+            "300x250.png\tCSCrave-BuyNow"
+        ),
+        height=150,
+        key="perdue_creative_mapping",
+    )
+
+    with st.expander("Optional Landing Page Overrides", expanded=False):
+        st.caption(
+            "Known Perdue landing pages are built into perdue.py. Use this only for a "
+            "new Product/Effort that is not configured yet. Format: Product-Effort<TAB>URL."
+        )
+        landing_page_overrides_text = st.text_area(
+            "Landing Page Overrides",
+            placeholder="NewProduct-Effort\thttps://www.perdue.com/...",
+            height=120,
+            key="perdue_landing_overrides",
+        )
+
+    output_name = st.text_input(
+        "Output File Name",
+        value="Perdue_Tsheet.xlsm",
+        key="perdue_output",
+    )
+    if not output_name.lower().endswith(".xlsm"):
+        output_name += ".xlsm"
+
+    preview = None
+    if prisma_file is not None and creative_files:
+        try:
+            preview = preview_perdue_setup(
+                prisma_file=prisma_file,
+                creative_files=creative_files,
+                creative_mapping_text=creative_mapping_text,
+                landing_page_overrides_text=landing_page_overrides_text,
+            )
+
+            rows = preview.get("rows", [])
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Placements", len(rows))
+            m2.metric("Creatives Matched", preview.get("matched_count", 0))
+            m3.metric("Unmatched", preview.get("unmatched_count", 0))
+            m4.metric("Final URLs Created", preview.get("url_matched_count", 0))
+
+            preview_rows = []
+            for row in rows:
+                preview_rows.append({
+                    "Placement Name": row.get("placement_name", ""),
+                    "Channel": row.get("channel", ""),
+                    "Partner": row.get("partner", ""),
+                    "Size": row.get("size", ""),
+                    "Concept": row.get("concept", ""),
+                    "Ad Name": row.get("ad_name", ""),
+                    "Original Creative": row.get("original_creative", ""),
+                    "Renamed Creative": row.get("renamed_creative", ""),
+                    "Final URL + UTM": row.get("final_url", ""),
+                    "Status": row.get("status", ""),
+                })
+
+            with st.expander("Perdue Matching Preview", expanded=True):
+                st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+
+            if preview.get("unmatched_count", 0):
+                st.warning(
+                    "Some creatives could not be matched safely. Add them to Optional "
+                    "Creative Mapping above before generating the final files."
+                )
+
+            if preview.get("url_unmatched_count", 0):
+                st.warning(
+                    "Some placements do not have a configured landing page. Add only "
+                    "those new Product/Effort landing pages under Landing Page Overrides."
+                )
+
+            if preview.get("warnings"):
+                with st.expander("Perdue Preview Warnings", expanded=False):
+                    for warning in preview["warnings"]:
+                        st.warning(warning)
+
+        except Exception as exc:
+            st.exception(exc)
+
+    if st.button(
+        "Generate Perdue T-Sheet + Renamed Creatives",
+        type="primary",
+        use_container_width=True,
+        key="generate_perdue",
+    ):
+        if prisma_file is None:
+            st.error("Please upload the Prisma CSV.")
+        elif not creative_files:
+            st.error("Please upload the Perdue creative files.")
+        else:
+            try:
+                with st.spinner("Generating Perdue T-Sheet and renamed creatives..."):
+                    output_bytes, renamed_zip, warnings, stats = generate_perdue_tsheet(
+                        prisma_file=prisma_file,
+                        creative_files=creative_files,
+                        creative_mapping_text=creative_mapping_text,
+                        landing_page_overrides_text=landing_page_overrides_text,
+                    )
+
+                log_dashboard_usage(
+                    account="Perdue",
+                    action="T-Sheet Generated",
+                    output_file=output_name,
+                    ads_processed=stats.get("placement_count", 0),
+                    direct_count=stats.get("matched_count", 0),
+                    multi_count=0,
+                    unmatched_count=stats.get("unmatched_count", 0),
+                    creative_count=stats.get("creative_count", 0),
+                    warning_count=len(warnings),
+                    estimated_minutes_saved=60,
+                )
+
+                st.success("Perdue T-Sheet and renamed creatives generated successfully.")
+                st.caption(
+                    f"{stats.get('placement_count', 0)} placements processed | "
+                    f"{stats.get('matched_count', 0)} creative matches | "
+                    f"{stats.get('url_matched_count', 0)} Final URLs created"
+                )
+
+                if warnings:
+                    with st.expander("Review Perdue warnings", expanded=False):
+                        for warning in warnings:
+                            st.warning(warning)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.download_button(
+                        "Download Perdue T-Sheet",
+                        data=output_bytes,
+                        file_name=output_name,
+                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                        use_container_width=True,
+                    )
+                with c2:
+                    st.download_button(
+                        "Download Renamed Creatives ZIP",
+                        data=renamed_zip,
+                        file_name="Perdue_Renamed_Creatives.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
+
             except Exception as exc:
                 st.exception(exc)
 
