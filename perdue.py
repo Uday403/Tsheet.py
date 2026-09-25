@@ -8,7 +8,7 @@ from copy import copy
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openpyxl import load_workbook
 
@@ -138,15 +138,51 @@ def parse_perdue_placement(placement_name: str) -> dict:
     return data
 
 
-def landing_page_for(tax: dict, overrides: dict[str, str] | None = None) -> str:
+def parse_landing_urls(text: str) -> dict[str, str]:
+    """Parse user-provided BASE landing URLs.
+
+    Supported formats:
+      1) One URL only -> applies to every Perdue placement.
+      2) Product-Effort<TAB>URL
+      3) CreativeName-CTA<TAB>URL
+      4) Product-Effort|CreativeName|CTA<TAB>URL
+
+    The user supplies the landing URL; Perdue UTM parameters are appended by code.
+    """
+    lines = [line.strip() for line in _clean(text).splitlines() if line.strip()]
+    result: dict[str, str] = {}
+    bare_urls: list[str] = []
+
+    for line in lines:
+        parts = re.split(r"\t+", line, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip().startswith(("http://", "https://")):
+            result[parts[0].strip()] = parts[1].strip()
+        elif line.startswith(("http://", "https://")):
+            bare_urls.append(line)
+
+    if len(bare_urls) == 1:
+        result["__default__"] = bare_urls[0]
+    elif len(bare_urls) > 1:
+        result["__multiple_unmapped__"] = "1"
+
+    return result
+
+
+def landing_page_for(tax: dict, user_urls: dict[str, str] | None = None) -> str:
+    """Resolve ONLY from URLs supplied by the user; do not invent a landing page."""
     product = tax.get("Product-Effort", "")
     creative = tax.get("CreativeName", "")
     cta = tax.get("CTA", "")
-    overrides = overrides or {}
-    for key in (f"{product}|{creative}|{cta}", product):
-        if key in overrides:
-            return overrides[key]
-    return LANDING_PAGE_RULES.get((product, creative, cta), PRODUCT_LANDING_PAGES.get(product, ""))
+    user_urls = user_urls or {}
+    for key in (
+        f"{product}|{creative}|{cta}",
+        f"{creative}-{cta}",
+        product,
+        "__default__",
+    ):
+        if user_urls.get(key):
+            return user_urls[key]
+    return ""
 
 
 def build_final_url(tax: dict, landing_page: str) -> str:
@@ -158,8 +194,13 @@ def build_final_url(tax: dict, landing_page: str) -> str:
         "utm_campaign": f'{tax.get("Product-Effort", "")}_{tax.get("Family", "")}',
         "utm_term": f'{tax.get("Tactic/Demo", "")}_{tax.get("CreativeName", "")}-{tax.get("CTA", "")}',
     }
-    # Proper encoding prevents A&E / Kelly&Mark from breaking query parameters.
-    return landing_page.rstrip("?") + "?" + urlencode(params, safe="-_|:")
+    # Keep any non-UTM query parameters already present in the supplied landing URL,
+    # but replace/add the four Perdue UTM parameters deterministically.
+    parts = urlsplit(landing_page.strip())
+    existing = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                if k.lower() not in {"utm_source", "utm_medium", "utm_campaign", "utm_term"}]
+    query = urlencode(existing + list(params.items()), doseq=True, safe="-_|:")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def _platform_for_creative(tax: dict) -> str:
@@ -268,18 +309,6 @@ def parse_creative_mapping(text: str) -> dict[str, str]:
     return result
 
 
-def parse_landing_page_overrides(text: str) -> dict[str, str]:
-    """Product-Effort[|CreativeName|CTA]<TAB>https://landing-page"""
-    result = {}
-    for line in _clean(text).splitlines():
-        if not line.strip():
-            continue
-        parts = re.split(r"\t+", line.strip(), maxsplit=1)
-        if len(parts) == 2 and parts[1].startswith(("http://", "https://")):
-            result[parts[0].strip()] = parts[1].strip()
-    return result
-
-
 def _match_creative(tax: dict, creatives: list[dict], mapping: dict[str, str]) -> tuple[dict | None, str]:
     target = f'{tax.get("CreativeName", "")}-{tax.get("CTA", "")}'
     target_norm = _norm(target)
@@ -316,12 +345,14 @@ def _match_creative(tax: dict, creatives: list[dict], mapping: dict[str, str]) -
     return best[0], "Matched"
 
 
-def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str = "", landing_page_overrides_text: str = "") -> dict:
+def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str = "", landing_urls_text: str = "") -> dict:
     _, records = read_prisma_export(prisma_file)
     creatives = _read_creatives(creative_files)
     mapping = parse_creative_mapping(creative_mapping_text)
-    overrides = parse_landing_page_overrides(landing_page_overrides_text)
+    user_urls = parse_landing_urls(landing_urls_text)
     rows, warnings = [], []
+    if user_urls.get("__multiple_unmapped__"):
+        warnings.append("Multiple bare landing URLs were pasted. Use Product-Effort<TAB>URL or CreativeName-CTA<TAB>URL so each URL can be mapped safely.")
 
     for rec in records:
         placement = _get(rec, "Placement Name")
@@ -331,14 +362,14 @@ def preview_perdue_setup(prisma_file, creative_files, creative_mapping_text: str
             rows.append({"placement_name": placement, "status": "Taxonomy error"})
             continue
 
-        landing = landing_page_for(tax, overrides)
+        landing = landing_page_for(tax, user_urls)
         url = build_final_url(tax, landing) if landing else ""
         creative, status = _match_creative(tax, creatives, mapping)
         renamed = build_creative_filename(tax, creative["extension"]) if creative else ""
         ad_name = build_ad_name(tax)
 
         if not landing:
-            warnings.append(f"Landing page required for {tax['Product-Effort']} / {tax['CreativeName']}-{tax['CTA']}.")
+            warnings.append(f"User landing URL required for {tax['Product-Effort']} / {tax['CreativeName']}-{tax['CTA']}.")
         if status != "Matched":
             warnings.append(f"{status} creative for {placement}. Add Creative Mapping if the raw filename is generic.")
 
@@ -447,7 +478,7 @@ def generate_perdue_tsheet(
     prisma_file,
     creative_files,
     creative_mapping_text: str = "",
-    landing_page_overrides_text: str = "",
+    landing_urls_text: str = "",
     template_path: str | Path | None = None,
 ) -> tuple[bytes, bytes, list[str], dict]:
     """Return (xlsm_bytes, renamed_creatives_zip_bytes, warnings, stats)."""
@@ -456,7 +487,7 @@ def generate_perdue_tsheet(
         prisma_file=prisma_file,
         creative_files=creative_files,
         creative_mapping_text=creative_mapping_text,
-        landing_page_overrides_text=landing_page_overrides_text,
+        landing_urls_text=landing_urls_text,
     )
 
     template = Path(template_path) if template_path else MASTER_TEMPLATE
